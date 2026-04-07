@@ -1,0 +1,308 @@
+---
+name: django-architecture
+description: Implement a Django feature following the opinionated architecture — repository pattern, Pydantic DTOs, svcs service locator, DRF ViewSet API, Celery reliable signals, and layered tests. Use when the user asks to add a new entity, endpoint, app, or business logic in a Django project that follows these conventions.
+allowed-tools: Read, Write, Edit, Bash, Grep, Glob
+---
+
+# Implement a Django Feature
+
+You are implementing a feature in an opinionated Django project managed with `uv`. Every convention below is mandatory. Do not deviate.
+
+**Why this architecture exists:** Django's ORM is powerful but hard to type — querysets, model instances, related managers, and `F()`/`Q()` expressions don't play well with static type checkers. This project solves that by pushing all ORM usage into repositories that return Pydantic DTOs. Services receive repos via constructor injection and contain pure business logic with zero ORM imports. Views are thin dispatchers. The result: everything from the repository boundary outward is fully typed, IDE-friendly, and testable in isolation.
+
+**Tooling:** `uv` is the package manager. All commands use `uv run`. Never use `pip`, `poetry`, or raw `python` — always `uv run python`, `uv run pytest`, etc. To add a dependency: `uv add <package>`.
+
+## BEFORE WRITING CODE
+
+Gather current project state by reading:
+
+- `src/config/services.py` — registered repos/services
+- `src/config/settings/base.py` — `INSTALLED_APPS` and `REST_FRAMEWORK` config
+- `src/config/urls.py` — included app URLs
+- `src/config/types.py` — `AuthedRequest` and other shared request types
+- Any existing app the feature touches
+
+Then state your implementation plan: models, DTOs, repos, services, views, tests.
+
+---
+
+## LAYER-BY-LAYER IMPLEMENTATION
+
+Follow this exact order. Do not skip layers. Each layer has rules that are non-negotiable.
+
+### Layer 1: Model
+
+File: `src/apps/<app>/models.py`
+
+Follow the **django-models** skill for full conventions. The key rules:
+
+- `class Meta` is **always first** inside the model body — with `verbose_name`, `verbose_name_plural`, and `indexes`
+- Use Django's default `BigAutoField` for primary keys — do NOT define explicit PK fields
+- All indexes in `Meta.indexes` — never `db_index=True` on fields
+- ZERO business logic — no custom managers, no `save()` overrides, no signals, no properties that compute
+- `__str__` is the only method allowed
+
+```python
+from django.db import models
+
+
+class MyEntity(models.Model):
+    class Meta:
+        verbose_name = "my entity"
+        verbose_name_plural = "my entities"
+        indexes = [
+            models.Index(fields=["created_at"], name="idx_%(class)s_created"),
+        ]
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    name = models.CharField(max_length=255)
+
+    def __str__(self):
+        return self.name
+```
+
+If this is a new app, add it to `INSTALLED_APPS` in `src/config/settings/base.py` using the dotted path to its `AppConfig` (e.g., `"apps.myapp.apps.MyAppConfig"`).
+
+Then run:
+```bash
+uv run python src/manage.py makemigrations && uv run python src/manage.py migrate
+```
+
+### Layer 2: DTO
+
+File: `src/apps/<app>/dtos.py`
+
+RULES:
+- `model_config = ConfigDict(from_attributes=True)` — always
+- For Django `RelatedManager` fields (reverse FKs, M2M), add the coercion validator:
+
+```python
+@field_validator("children", mode="before")
+@classmethod
+def coerce_related_manager(cls, v):
+    if hasattr(v, "all"):
+        return list(v.all())
+    return v
+```
+
+### Layer 3: Repository
+
+File: `src/apps/<app>/repositories.py`
+
+RULES:
+- ORM objects NEVER leave this layer — every public method returns a DTO or `list[DTO]`
+- Convert with `MyEntityDTO.model_validate(orm_obj)`
+- `prefetch_related()` when the DTO has nested relations
+- `@transaction.atomic` on any method with multiple writes
+- One repo per aggregate root — child entities are managed by the parent's repo
+
+### Layer 4: Service
+
+File: `src/apps/<app>/services.py`
+
+RULES:
+- Receives repos via `__init__` — NEVER instantiates them, NEVER imports models
+- Contains all business logic: validation, orchestration, cross-repo coordination
+- Touches ZERO ORM — no `.objects`, no `F()`, no `Q()`, no model imports
+- Returns DTOs
+
+### Layer 5: Register in svcs
+
+Add to `src/config/services.py`:
+
+```python
+from apps.myapp.repositories import MyEntityRepository
+from apps.myapp.services import MyEntityService
+
+registry.register_factory(MyEntityRepository, MyEntityRepository)
+
+def _my_entity_service_factory(container: svcs.Container) -> MyEntityService:
+    repo = container.get(MyEntityRepository)
+    return MyEntityService(repo)
+
+registry.register_factory(MyEntityService, _my_entity_service_factory)
+```
+
+### Layer 6: API Views
+
+Views live inside the app — `src/apps/<app>/views.py`, `src/apps/<app>/serializers.py`, `src/apps/<app>/urls.py`.
+
+`src/apps/<app>/views.py`:
+
+```python
+from rest_framework import status, viewsets
+from rest_framework.response import Response
+
+from config.services import get
+
+from .services import MyEntityService
+from .serializers import CreateMyEntitySerializer
+
+
+class MyEntityViewSet(viewsets.ViewSet):
+    def list(self, request):
+        dtos = get(MyEntityService).list_entities()
+        return Response([dto.model_dump() for dto in dtos])
+
+    def create(self, request):
+        serializer = CreateMyEntitySerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        dto = get(MyEntityService).create_entity(**serializer.validated_data)
+        return Response(dto.model_dump(), status=status.HTTP_201_CREATED)
+
+    def retrieve(self, request, pk=None):
+        dto = get(MyEntityService).get_entity(pk)
+        return Response(dto.model_dump())
+```
+
+`src/apps/<app>/serializers.py`:
+
+```python
+from rest_framework import serializers
+
+
+class CreateMyEntitySerializer(serializers.Serializer):
+    name = serializers.CharField()
+```
+
+`src/apps/<app>/urls.py`:
+
+```python
+from rest_framework.routers import DefaultRouter
+
+from .views import MyEntityViewSet
+
+router = DefaultRouter()
+router.register(r"my-entities", MyEntityViewSet, basename="my-entity")
+
+urlpatterns = router.urls
+```
+
+Then include in `src/config/urls.py`:
+
+```python
+path("api/", include("apps.myapp.urls")),
+```
+
+For nested resources, use `drf-nested-routers`:
+
+```python
+from rest_framework_nested import routers
+
+router = routers.DefaultRouter()
+router.register(r"orders", OrderViewSet, basename="order")
+
+orders_router = routers.NestedDefaultRouter(router, r"orders", lookup="order")
+orders_router.register(r"items", OrderItemViewSet, basename="order-items")
+
+urlpatterns = router.urls + orders_router.urls
+```
+
+RULES:
+- ViewSets do NOT try/except — errors bubble up to the central exception handler in `src/config/exception_handler.py`
+- Services raise `ValueError` → 400, `LookupError` → 404, `PermissionError` → 403
+
+### Layer 7: Admin
+
+File: `src/apps/<app>/admin.py`
+
+Follow the **django-models** skill for full admin conventions. The key rules:
+
+- Register every model with `@admin.register`
+- `list_display` — `id` first, then 3-5 most useful columns
+- `list_per_page = 25`
+- `search_fields` — always include `id`
+- `readonly_fields` — always include `id`
+- `ordering` — explicit, usually `-created_at`
+- `list_select_related` — specify FKs shown in `list_display`
+- `raw_id_fields` or `autocomplete_fields` for FKs to large tables
+- `TabularInline` for child models — `extra = 0`, `show_change_link = True`
+
+---
+
+## TESTS
+
+Write three test layers in `src/apps/<app>/tests/`. No test file may be skipped.
+
+### `test_repo.py` — Real database, validate ORM → DTO conversion
+
+```python
+@pytest.mark.django_db
+def test_create_and_get():
+    repo = MyEntityRepository()
+    dto = repo.create(name="Test")
+    assert isinstance(dto, MyEntityDTO)
+    fetched = repo.get_by_id(dto.id)
+    assert fetched == dto
+```
+
+### `test_service.py` — Mock the repos, validate business logic
+
+```python
+from unittest.mock import MagicMock
+
+def test_create_delegates_to_repo():
+    repo = MagicMock()
+    expected = MyEntityDTO(id=1, name="Test")
+    repo.create.return_value = expected
+
+    service = MyEntityService(repo)
+    result = service.create_entity(name="Test")
+
+    assert result == expected
+    repo.create.assert_called_once_with(name="Test")
+```
+
+### `test_api.py` — Integration through HTTP
+
+```python
+from rest_framework.test import APIClient
+
+@pytest.fixture
+def api_client():
+    return APIClient()
+
+@pytest.mark.django_db
+def test_create(api_client):
+    resp = api_client.post("/api/my-entities/", data={"name": "Test"}, format="json")
+    assert resp.status_code == 201
+    assert resp.data["name"] == "Test"
+```
+
+---
+
+## RELIABLE SIGNALS (CELERY)
+
+When a business operation needs to trigger async side-effects, use reliable signals — NOT standard Django signals. See the **django-signals** skill for full details.
+
+---
+
+## VERIFY
+
+Run all four checks. ALL must pass before you report done.
+
+```bash
+uv run ruff check src
+uv run ruff format --check src
+uv run pyrefly check src
+uv run pytest
+```
+
+---
+
+## COMPLETION CHECKLIST
+
+- [ ] Model in `src/apps/<app>/models.py`: `Meta` first, `BigAutoField` PK, zero logic
+- [ ] DTO in `src/apps/<app>/dtos.py`: `from_attributes=True`
+- [ ] Repository in `src/apps/<app>/repositories.py`: returns DTOs only
+- [ ] Service in `src/apps/<app>/services.py`: repos via `__init__`, zero ORM
+- [ ] Repo and service registered in `src/config/services.py`
+- [ ] ViewSet in `src/apps/<app>/views.py`, serializers in `serializers.py`, router in `urls.py`
+- [ ] App URLs included in `src/config/urls.py`
+- [ ] Admin registered per **django-models** skill conventions
+- [ ] App in `INSTALLED_APPS` (if new) using dotted `AppConfig` path
+- [ ] Migrations generated and applied
+- [ ] `test_repo.py`: real DB, asserts DTO type
+- [ ] `test_service.py`: mocked repos, tests business logic
+- [ ] `test_api.py`: HTTP integration with `APIClient`, asserts status codes + response shape
+- [ ] `ruff check`, `ruff format --check`, `pyrefly check`, `pytest` all pass
