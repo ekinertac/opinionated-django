@@ -29,6 +29,7 @@ Each layer encapsulates the one beneath it. The API layer never touches the ORM.
 
 | Concern                  | Tool                                                                                                                                                                                                               |
 |--------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **Local environment**    | [Docker Compose](https://docs.docker.com/compose/) — postgres, redis, celery, web                                                                                                                                  |
 | **Packaging**            | [uv](https://docs.astral.sh/uv/)                                                                                                                                                                                   |
 | **Settings**             | [python-decouple](https://github.com/HBNetwork/python-decouple)                                                                                                                                                    |
 | **Linting & formatting** | [ruff](https://docs.astral.sh/ruff/)                                                                                                                                                                               |
@@ -75,7 +76,7 @@ Skills install with a single command:
 npx skills add ekinertac/opinionated-django
 
 # Or just one
-npx skills add ekinertac/opinionated-django/django-scaffold|django-architecture|django-models|django-services|django-signals|django-settings|django-lint
+npx skills add ekinertac/opinionated-django/django-scaffold|django-docker|django-architecture|django-models|django-services|django-signals|django-settings|django-pytest|django-lint
 ```
 
 Your agent will pick them up automatically on its next run. You can also clone the repo and point your agent at `skills/` directly.
@@ -86,6 +87,9 @@ Each skill is a directory under `skills/` with its own `SKILL.md`. They stand al
 
 ### `django-scaffold`
 Sets up a new (or existing) Django project into the opinionated layout. Creates the `src/config/` shell — split settings, services registry, exception handler, reliable signals, Celery wiring — installs dependencies with `uv`, and lays down ruff / pyrefly / pytest config. **Run this first.**
+
+### `django-docker`
+Adds Docker Compose for local development — `Dockerfile`, `docker-compose.yml` (web + postgres + redis + celery), `.dockerignore`, and `.env.example`. All dev commands run inside the `web` container. **Run after `django-scaffold`.**
 
 ### `django-services`
 Plain service classes with constructor-injected repositories, wired through an [svcs](https://svcs.hynek.me) registry. Business logic lives here, zero ORM imports allowed. Resolve anywhere — views, Celery tasks, management commands, tests — with a single generic `get[T]()` call.

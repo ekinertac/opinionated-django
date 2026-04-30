@@ -6,11 +6,11 @@ allowed-tools: Bash, Read, Edit
 
 # Lint and Type-Check
 
-Run the full static-analysis suite on the project and fix any issues found.
+Run the full static-analysis suite on the project and fix any issues found. All commands run inside the `web` container — the project uses Docker Compose for local development.
 
-1. `uv run ruff check src` — lint the code
-2. `uv run ruff format --check src` — verify formatting
-3. `uv run pyrefly check src` — static type analysis
+1. `docker compose run --rm web uv run ruff check src` — lint the code
+2. `docker compose run --rm web uv run ruff format --check src` — verify formatting
+3. `docker compose run --rm web uv run pyrefly check src` — static type analysis
 
 Fix every issue reported (re-run until clean) and report a short summary of what changed when done. If a failure is not auto-fixable, explain what needs human judgement rather than silencing it.
 

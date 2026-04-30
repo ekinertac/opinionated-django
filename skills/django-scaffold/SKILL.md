@@ -8,6 +8,8 @@ allowed-tools: Read, Write, Edit, Bash, Grep, Glob
 
 You are preparing a Django project to use the opinionated patterns. After this skill runs, the other skills can add features on top without any further setup.
 
+Local development runs entirely in Docker Compose (postgres + redis + celery + web). After this skill, run `django-docker` to add the `Dockerfile`, `docker-compose.yml`, `.dockerignore`, and `.env.example`. The settings below already assume those services exist by hostname.
+
 ## BEFORE WRITING CODE
 
 Figure out which situation you're in:
@@ -20,6 +22,10 @@ Read `pyproject.toml` (if present) and locate `manage.py` and `settings.py` so y
 ## Target Layout
 
 ```
+Dockerfile
+docker-compose.yml
+.dockerignore
+.env.example
 src/
   manage.py
   config/
@@ -69,9 +75,11 @@ Use `uv` for everything. Never `pip` or `poetry`.
 ```bash
 uv add 'django>=6.0' 'djangorestframework>=3.16' 'drf-spectacular>=0.28' \
        'drf-nested-routers>=0.94' 'pydantic>=2.0' 'svcs>=25.1' \
-       'celery>=5.4' python-decouple
+       'celery>=5.4' 'psycopg[binary]>=3.2' python-decouple
 uv add --dev ruff 'pyrefly>=0.42' django-stubs pytest pytest-django
 ```
+
+`psycopg[binary]` is the Postgres driver — Compose's `postgres` service is the dev database.
 
 Pyrefly auto-recognizes Django constructs as long as `django-stubs` is installed — no plugin, no `mypy_django_plugin`-style config.
 
@@ -324,8 +332,12 @@ WSGI_APPLICATION = "config.wsgi.application"
 
 DATABASES = {
     "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "db.sqlite3",
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": config("POSTGRES_DB", default="app"),
+        "USER": config("POSTGRES_USER", default="app"),
+        "PASSWORD": config("POSTGRES_PASSWORD", default="app"),
+        "HOST": config("POSTGRES_HOST", default="postgres"),
+        "PORT": config("POSTGRES_PORT", default="5432"),
     }
 }
 
@@ -343,8 +355,8 @@ SPECTACULAR_SETTINGS = {
 }
 
 # --- Celery ---
-CELERY_BROKER_URL = config("CELERY_BROKER_URL", default="redis://localhost:6379/0")
-CELERY_RESULT_BACKEND = config("CELERY_RESULT_BACKEND", default="redis://localhost:6379/0")
+CELERY_BROKER_URL = config("CELERY_BROKER_URL", default="redis://redis:6379/1")
+CELERY_RESULT_BACKEND = config("CELERY_RESULT_BACKEND", default="redis://redis:6379/2")
 ```
 
 ### `src/config/settings/local.py`
@@ -430,12 +442,14 @@ pythonpath = ["src"]
 
 ## Step 11: Verify
 
+All commands run inside the `web` container (after `django-docker` has scaffolded the Compose stack):
+
 ```bash
-uv run python src/manage.py check
-uv run ruff check src
-uv run ruff format --check src
-uv run pyrefly check src
-uv run pytest
+docker compose run --rm web uv run python manage.py check
+docker compose run --rm web uv run ruff check src
+docker compose run --rm web uv run ruff format --check src
+docker compose run --rm web uv run pyrefly check src
+docker compose run --rm web uv run pytest
 ```
 
 All five must pass. Fix any issue rather than silencing it.

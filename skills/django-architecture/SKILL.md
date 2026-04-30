@@ -10,7 +10,7 @@ You are implementing a feature in an opinionated Django project managed with `uv
 
 **Why this architecture exists:** Django's ORM is powerful but hard to type — querysets, model instances, related managers, and `F()`/`Q()` expressions don't play well with static type checkers. This project solves that by pushing all ORM usage into repositories that return Pydantic DTOs. Services receive repos via constructor injection and contain pure business logic with zero ORM imports. Views are thin dispatchers. The result: everything from the repository boundary outward is fully typed, IDE-friendly, and testable in isolation.
 
-**Tooling:** `uv` is the package manager. All commands use `uv run`. Never use `pip`, `poetry`, or raw `python` — always `uv run python`, `uv run pytest`, etc. To add a dependency: `uv add <package>`.
+**Tooling:** `uv` is the package manager. Local development runs entirely in Docker Compose — every command is wrapped as `docker compose run --rm web uv run <cmd>`. Never use `pip`, `poetry`, or raw `python`. To add a dependency: `docker compose run --rm web uv add <package>`. See the `django-docker` skill for the Compose stack.
 
 ## BEFORE WRITING CODE
 
@@ -65,7 +65,7 @@ If this is a new app, add it to `INSTALLED_APPS` in `src/config/settings/base.py
 
 Then run:
 ```bash
-uv run python src/manage.py makemigrations && uv run python src/manage.py migrate
+docker compose run --rm web uv run python manage.py makemigrations && docker compose run --rm web uv run python manage.py migrate
 ```
 
 ### Layer 2: DTO
@@ -282,10 +282,10 @@ When a business operation needs to trigger async side-effects, use reliable sign
 Run all four checks. ALL must pass before you report done.
 
 ```bash
-uv run ruff check src
-uv run ruff format --check src
-uv run pyrefly check src
-uv run pytest
+docker compose run --rm web uv run ruff check src
+docker compose run --rm web uv run ruff format --check src
+docker compose run --rm web uv run pyrefly check src
+docker compose run --rm web uv run pytest
 ```
 
 ---
