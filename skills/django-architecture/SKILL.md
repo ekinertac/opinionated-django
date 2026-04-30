@@ -34,6 +34,15 @@ Follow this exact order. Do not skip layers. Each layer has rules that are non-n
 
 File: `src/apps/<app>/models.py`
 
+If the app doesn't exist yet, let Django generate it — don't hand-roll the skeleton. Run:
+
+```bash
+mkdir -p src/apps/<app>
+docker compose run --rm web uv run python manage.py startapp <app> src/apps/<app>
+```
+
+Then edit the generated `src/apps/<app>/apps.py` so the `name` attribute uses the dotted path: `name = "apps.<app>"`. Everything else Django generated (`models.py`, `admin.py`, `migrations/`, `views.py`, `tests.py`) gets customized in the layers below — `views.py` becomes a DRF ViewSet, `tests.py` is replaced with the `tests/` package, etc.
+
 Follow the **django-models** skill for full conventions. The key rules:
 
 - `class Meta` is **always first** inside the model body — with `verbose_name`, `verbose_name_plural`, and `indexes`

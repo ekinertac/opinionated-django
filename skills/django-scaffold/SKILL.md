@@ -14,10 +14,12 @@ Local development runs entirely in Docker Compose (postgres + redis + celery + w
 
 Figure out which situation you're in:
 
-- **Greenfield** — no Django project exists yet. You will run `uv init` and `django-admin startproject`, then transform the result.
+- **Greenfield** — no Django project exists yet. You will run `uv init` and `django-admin startproject config src`, then transform the result.
 - **Existing Django project** — a `manage.py`, `settings.py`, and at least one app already exist. You will add the `config/` shell alongside what's there and relocate files only if asked.
 
 Read `pyproject.toml` (if present) and locate `manage.py` and `settings.py` so you know the project's current layout. Confirm with the user before moving any existing files.
+
+**Operating principle: let the official tools do their job, then customize.** When Django (or `uv`, or any other official tool) ships a CLI that generates boilerplate — `django-admin startproject`, `python manage.py startapp`, `uv init` — run it and edit the result. Never transcribe its generated output (`INSTALLED_APPS`, `MIDDLEWARE`, `manage.py`, `wsgi.py`, etc.) into a hand-written block. Generated boilerplate evolves between versions, and a transcribed copy goes stale silently. Show only the diffs that are actually ours.
 
 ## Target Layout
 
@@ -149,20 +151,24 @@ def custom_exception_handler(exc, context):
 
 ## Step 5: `src/config/urls.py`
 
-```python
-from django.contrib import admin
-from django.urls import include, path
-from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
+`django-admin startproject` already wrote this file with the `admin/` route. Edit it — don't replace it.
 
-urlpatterns = [
-    path("admin/", admin.site.urls),
-    path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
-    path("api/docs/", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"),
-    # App URLs — each app owns its own routing
-    # path("api/", include("apps.products.urls")),
-    # path("api/", include("apps.orders.urls")),
-]
-```
+1. Add an import:
+
+   ```python
+   from django.urls import include, path
+   from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
+   ```
+
+2. Add to `urlpatterns` after the existing `admin/` entry:
+
+   ```python
+   path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
+   path("api/docs/", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"),
+   # App URLs — each app owns its own routing. Uncomment as you add apps:
+   # path("api/", include("apps.products.urls")),
+   # path("api/", include("apps.orders.urls")),
+   ```
 
 Each app defines its own `urls.py` with a DRF router and ViewSets. The root `urls.py` includes them.
 
@@ -262,158 +268,117 @@ __all__ = ("celery_app",)
 
 ## Step 9: Settings
 
-Split settings into three files under `src/config/settings/`:
+**Principle:** let `django-admin` emit Django's current defaults, then layer the opinionated changes on top. Do NOT transcribe `INSTALLED_APPS`, `MIDDLEWARE`, `TEMPLATES`, etc. into this skill — those evolve between Django versions and a verbatim copy goes stale silently.
 
-### `src/config/settings/__init__.py`
+For greenfield projects, `django-admin startproject config src` has already created `src/config/settings.py` (along with `manage.py`, `urls.py`, `wsgi.py`, `asgi.py`). Convert that single settings file into a package and apply the diffs below.
 
-Empty or imports from the default environment:
+### Step 9a: Convert `settings.py` to a package
 
-```python
+```bash
+mkdir -p src/config/settings
+mv src/config/settings.py src/config/settings/base.py
+touch src/config/settings/__init__.py
 ```
 
-### `src/config/settings/base.py`
+### Step 9b: Edits to `src/config/settings/base.py`
 
-Shared settings across all environments:
+Apply these changes to whatever Django generated. Anything not mentioned here stays untouched.
 
-```python
-from pathlib import Path
-from decouple import config
+1. **Imports** — add at the top, after `Path`:
 
-BASE_DIR = Path(__file__).resolve().parent.parent.parent
+   ```python
+   from decouple import config
+   ```
 
-SECRET_KEY = config("SECRET_KEY", default="change-me-in-production")
-DEBUG = False
-ALLOWED_HOSTS = []
+2. **`SECRET_KEY`, `DEBUG`, `ALLOWED_HOSTS`** — replace the literals with `decouple` reads:
 
-INSTALLED_APPS = [
-    "django.contrib.admin",
-    "django.contrib.auth",
-    "django.contrib.contenttypes",
-    "django.contrib.sessions",
-    "django.contrib.messages",
-    "django.contrib.staticfiles",
-    # Third-party
-    "rest_framework",
-    "drf_spectacular",
-    # Project apps
-    # "apps.products.apps.ProductsConfig",
-    # "apps.orders.apps.OrdersConfig",
-]
+   ```python
+   SECRET_KEY = config("SECRET_KEY", default="change-me-in-production")
+   DEBUG = False
+   ALLOWED_HOSTS: list[str] = []
+   ```
 
-MIDDLEWARE = [
-    "django.middleware.security.SecurityMiddleware",
-    "django.contrib.sessions.middleware.SessionMiddleware",
-    "django.middleware.common.CommonMiddleware",
-    "django.middleware.csrf.CsrfViewMiddleware",
-    "django.contrib.auth.middleware.AuthenticationMiddleware",
-    "django.contrib.messages.middleware.MessageMiddleware",
-    "django.middleware.clickjacking.XFrameOptionsMiddleware",
-]
+3. **`INSTALLED_APPS`** — keep Django's entries. Append two groups:
 
-ROOT_URLCONF = "config.urls"
+   ```python
+   INSTALLED_APPS = [
+       # ...keep whatever django-admin generated...
+       # Third-party
+       "rest_framework",
+       "drf_spectacular",
+       # Project apps
+       # "apps.products.apps.ProductsConfig",
+       # "apps.orders.apps.OrdersConfig",
+   ]
+   ```
 
-TEMPLATES = [
-    {
-        "BACKEND": "django.template.backends.django.DjangoTemplates",
-        "DIRS": [],
-        "APP_DIRS": True,
-        "OPTIONS": {
-            "context_processors": [
-                "django.template.context_processors.debug",
-                "django.template.context_processors.request",
-                "django.contrib.auth.context_processors.auth",
-                "django.contrib.messages.context_processors.messages",
-            ],
-        },
-    },
-]
+4. **`DATABASES`** — replace the generated sqlite block with postgres pointing at the Compose service:
 
-WSGI_APPLICATION = "config.wsgi.application"
+   ```python
+   DATABASES = {
+       "default": {
+           "ENGINE": "django.db.backends.postgresql",
+           "NAME": config("POSTGRES_DB", default="app"),
+           "USER": config("POSTGRES_USER", default="app"),
+           "PASSWORD": config("POSTGRES_PASSWORD", default="app"),
+           "HOST": config("POSTGRES_HOST", default="postgres"),
+           "PORT": config("POSTGRES_PORT", default="5432"),
+       }
+   }
+   ```
 
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.postgresql",
-        "NAME": config("POSTGRES_DB", default="app"),
-        "USER": config("POSTGRES_USER", default="app"),
-        "PASSWORD": config("POSTGRES_PASSWORD", default="app"),
-        "HOST": config("POSTGRES_HOST", default="postgres"),
-        "PORT": config("POSTGRES_PORT", default="5432"),
-    }
-}
+5. **Append the opinionated sections at the bottom of the file:**
 
-DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+   ```python
+   # --- DRF ---
+   REST_FRAMEWORK = {
+       "EXCEPTION_HANDLER": "config.exception_handler.custom_exception_handler",
+       "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+   }
 
-# --- DRF ---
-REST_FRAMEWORK = {
-    "EXCEPTION_HANDLER": "config.exception_handler.custom_exception_handler",
-    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
-}
+   SPECTACULAR_SETTINGS = {
+       "TITLE": "API",
+       "VERSION": "1.0.0",
+   }
 
-SPECTACULAR_SETTINGS = {
-    "TITLE": "API",
-    "VERSION": "1.0.0",
-}
+   # --- Celery ---
+   CELERY_BROKER_URL = config("CELERY_BROKER_URL", default="redis://redis:6379/1")
+   CELERY_RESULT_BACKEND = config("CELERY_RESULT_BACKEND", default="redis://redis:6379/2")
+   ```
 
-# --- Celery ---
-CELERY_BROKER_URL = config("CELERY_BROKER_URL", default="redis://redis:6379/1")
-CELERY_RESULT_BACKEND = config("CELERY_RESULT_BACKEND", default="redis://redis:6379/2")
-```
+`DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"` is already in Django's generated file as of Django 3.2+ — leave it alone.
 
-### `src/config/settings/local.py`
+The `django-settings` skill handles section ordering and banner formatting. After these edits, run that skill to clean the file up.
+
+### Step 9c: `local.py` and `production.py`
+
+Both inherit from `base.py` — only env-specific values:
 
 ```python
+# src/config/settings/local.py
 from .base import *  # noqa: F401, F403
 
 DEBUG = True
 ALLOWED_HOSTS = ["*"]
 ```
 
-### `src/config/settings/production.py`
-
 ```python
+# src/config/settings/production.py
+from decouple import config
+
 from .base import *  # noqa: F401, F403
 
 DEBUG = False
 ALLOWED_HOSTS = config("ALLOWED_HOSTS", default="", cast=lambda v: v.split(","))
 ```
 
-### `src/config/wsgi.py` and `src/config/asgi.py`
+### Step 9d: Repoint `manage.py`, `wsgi.py`, `asgi.py`
 
-```python
-# wsgi.py
-import os
-from django.core.wsgi import get_wsgi_application
+`django-admin` already wrote these — do NOT rewrite them. Just edit the one line in each that references the settings module:
 
-os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings.local")
-application = get_wsgi_application()
-```
-
-```python
-# asgi.py
-import os
-from django.core.asgi import get_asgi_application
-
-os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings.local")
-application = get_asgi_application()
-```
-
-### `src/manage.py`
-
-```python
-#!/usr/bin/env python
-import os
-import sys
-
-
-def main():
-    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings.local")
-    from django.core.management import execute_from_command_line
-    execute_from_command_line(sys.argv)
-
-
-if __name__ == "__main__":
-    main()
-```
+- `src/manage.py` — change `"config.settings"` to `"config.settings.local"`
+- `src/config/wsgi.py` — same
+- `src/config/asgi.py` — same
 
 ## Step 10: Tooling config in `pyproject.toml`
 
