@@ -65,12 +65,12 @@ INSTALLED_APPS = [
     "corsheaders",
     ...
     # Project apps
-    "apps.products.apps.ProductsConfig",
-    "apps.orders.apps.OrdersConfig",
+    "apps.products",
+    "apps.orders",
 ]
 ```
 
-Project apps must use the dotted path to their `AppConfig` subclass (e.g., `"apps.myapp.apps.MyAppConfig"`), not the short app name.
+Project apps use the short dotted path (`"apps.myapp"`) per Django convention. Django auto-discovers the `AppConfig` from each app's `apps.py`. Use the explicit `"apps.myapp.apps.MyAppConfig"` form only when an app defines multiple AppConfigs.
 
 ## Rules
 

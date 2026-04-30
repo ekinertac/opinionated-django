@@ -307,8 +307,8 @@ Apply these changes to whatever Django generated. Anything not mentioned here st
        "rest_framework",
        "drf_spectacular",
        # Project apps
-       # "apps.products.apps.ProductsConfig",
-       # "apps.orders.apps.OrdersConfig",
+       # "apps.products",
+       # "apps.orders",
    ]
    ```
 

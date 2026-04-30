@@ -70,7 +70,7 @@ class MyEntity(models.Model):
         return self.name
 ```
 
-If this is a new app, add it to `INSTALLED_APPS` in `src/config/settings/base.py` using the dotted path to its `AppConfig` (e.g., `"apps.myapp.apps.MyAppConfig"`).
+If this is a new app, add it to `INSTALLED_APPS` in `src/config/settings/base.py` using the short dotted path (e.g., `"apps.myapp"`) — this is Django's convention. Django auto-discovers the `AppConfig` from the app's `apps.py`. The explicit `"apps.myapp.apps.MyAppConfig"` form is only needed if an app defines multiple AppConfigs.
 
 Then run:
 ```bash
@@ -309,7 +309,7 @@ docker compose run --rm web uv run pytest
 - [ ] ViewSet in `src/apps/<app>/views.py`, serializers in `serializers.py`, router in `urls.py`
 - [ ] App URLs included in `src/config/urls.py`
 - [ ] Admin registered per **django-models** skill conventions
-- [ ] App in `INSTALLED_APPS` (if new) using dotted `AppConfig` path
+- [ ] App in `INSTALLED_APPS` (if new) using short dotted path (`"apps.<app>"`)
 - [ ] Migrations generated and applied
 - [ ] `test_repo.py`: real DB, asserts DTO type
 - [ ] `test_service.py`: mocked repos, tests business logic
