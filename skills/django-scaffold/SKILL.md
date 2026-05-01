@@ -38,6 +38,7 @@ src/
     celery.py
     services.py          # svcs registry + get() helper
     types.py             # AuthedRequest and other shared typing aliases
+    models.py            # Abstract BaseModel (created_at, updated_at)
     signals.py           # ReliableSignal base + send_reliable machinery
     exception_handler.py # Central DRF exception handler
     settings/
@@ -205,7 +206,27 @@ orders_router.register(r"items", OrderItemViewSet, basename="order-items")
 urlpatterns = router.urls + orders_router.urls
 ```
 
-## Step 7: `src/config/signals.py` — Reliable Signals
+## Step 7: `src/config/models.py` — Base Model
+
+Every concrete Django model in the project inherits from this abstract base. It provides `created_at` / `updated_at` so individual models don't redeclare them.
+
+```python
+from django.db import models
+
+
+class BaseModel(models.Model):
+    """Abstract base for every model in the project. Provides timestamps."""
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        abstract = True
+```
+
+That's the entire base. Resist adding more — every field here is a tax paid by every model. Soft delete, audit FKs, optimistic-locking versions, UUIDs, JSON metadata catch-alls all belong on the specific models that need them, not on the universal base. See the **django-models** skill for the full rationale and member-order rules.
+
+## Step 8: `src/config/signals.py` — Reliable Signals
 
 This module provides the `ReliableSignal` base that apps import. Receivers run asynchronously via Celery, and `send_reliable()` enqueues them inside the current DB transaction so rollbacks are respected.
 
@@ -242,7 +263,7 @@ class ReliableSignal(Signal):
             )
 ```
 
-## Step 8: Celery
+## Step 9: Celery
 
 Create `src/config/celery.py`:
 
@@ -266,7 +287,7 @@ from .celery import app as celery_app
 __all__ = ("celery_app",)
 ```
 
-## Step 9: Settings
+## Step 10: Settings
 
 **Principle:** let `django-admin` emit Django's current defaults, then layer the opinionated changes on top. Do NOT transcribe `INSTALLED_APPS`, `MIDDLEWARE`, `TEMPLATES`, etc. into this skill — those evolve between Django versions and a verbatim copy goes stale silently.
 
@@ -380,7 +401,7 @@ ALLOWED_HOSTS = config("ALLOWED_HOSTS", default="", cast=lambda v: v.split(","))
 - `src/config/wsgi.py` — same
 - `src/config/asgi.py` — same
 
-## Step 10: Tooling config in `pyproject.toml`
+## Step 11: Tooling config in `pyproject.toml`
 
 ```toml
 [tool.ruff]
@@ -405,7 +426,7 @@ pythonpath = ["src"]
 - Django's `QuerySet` typing beyond `.all()` is still thin. Keep chained queryset expressions inside the repository where you can annotate the return type as `list[SomeDTO]` and let the caller rely on that.
 - Pyrefly's Django support is **actively evolving**; re-check the docs when upgrading pyrefly and remove workarounds as they become unnecessary.
 
-## Step 11: Verify
+## Step 12: Verify
 
 After `django-docker` has scaffolded the Compose stack and Makefile, bring it up and run the suite:
 
@@ -424,6 +445,7 @@ All four must pass. Fix any issue rather than silencing it.
 - [ ] `src/config/services.py` with `registry` and `get()`
 - [ ] `src/config/types.py` with `AuthedRequest`
 - [ ] `src/config/exception_handler.py` with central DRF exception handler
+- [ ] `src/config/models.py` with `BaseModel` (abstract, timestamps only)
 - [ ] `src/config/signals.py` with `ReliableSignal` base
 - [ ] `src/config/celery.py` + `__init__.py` export
 - [ ] `src/config/settings/base.py` with `REST_FRAMEWORK`, `SPECTACULAR_SETTINGS`, `CELERY_*`

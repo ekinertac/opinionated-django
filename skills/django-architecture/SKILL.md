@@ -45,6 +45,7 @@ Then edit the generated `src/apps/<app>/apps.py` so the `name` attribute uses th
 
 Follow the **django-models** skill for full conventions. The key rules:
 
+- Inherit from `config.models.BaseModel` — not `models.Model` directly. Provides `created_at` / `updated_at`.
 - Member order: **choices → fields → manager (rare) → Meta → methods**
 - Use Django's default `BigAutoField` for primary keys — do NOT define explicit PK fields
 - All indexes in `Meta.indexes` — never `db_index=True` on fields
@@ -55,16 +56,17 @@ Follow the **django-models** skill for full conventions. The key rules:
 ```python
 from django.db import models
 
+from config.models import BaseModel
 
-class MyEntity(models.Model):
-    created_at = models.DateTimeField(auto_now_add=True)
+
+class MyEntity(BaseModel):
     name = models.CharField(max_length=255)
 
     class Meta:
         verbose_name = "my entity"
         verbose_name_plural = "my entities"
         indexes = [
-            models.Index(fields=["created_at"], name="idx_%(class)s_created"),
+            models.Index(fields=["-created_at"], name="idx_%(class)s_recent"),
         ]
 
     def __str__(self):

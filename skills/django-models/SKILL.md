@@ -18,6 +18,41 @@ Read the model file being created or modified, plus:
 
 ---
 
+## The `BaseModel`
+
+Every concrete model in the project inherits from `config.models.BaseModel`, an abstract base that supplies `created_at` and `updated_at`:
+
+```python
+# src/config/models.py
+from django.db import models
+
+
+class BaseModel(models.Model):
+    """Abstract base for every model in the project. Provides timestamps."""
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        abstract = True
+```
+
+**Resist adding more.** Each field on `BaseModel` is paid by every concrete model. Things that are NOT on `BaseModel` and should not be added:
+
+| Tempting addition | Why it stays off the base |
+|---|---|
+| `is_active` | Most models have no active/inactive state; forcing it pollutes every list query. |
+| Soft delete (`deleted_at`, `is_deleted`) | Every queryset and join must filter — one forgotten `.filter()` leaks deleted rows. Add deliberately to specific models, not via inheritance. |
+| `uuid: UUIDField` | UUID exposure is a per-model decision (some models use slugs, some expose nothing). |
+| `created_by` / `updated_by` FKs | Couples every domain model to `auth.User`. Audit trails belong on the models that genuinely need them. |
+| `metadata: JSONField` | Encourages dumping unstructured data instead of designing schema. |
+| `version` (optimistic lock) | Requires a `save()` override (banned) or repo-level enforcement; add to specific aggregates. |
+| Custom `__repr__` / `__str__` | Can't pick a sensible default — `__str__` needs a domain field; concrete models override. |
+
+The discipline of NOT adding to `BaseModel` is what keeps the project's data layer predictable. If a field genuinely applies to every model in the system, fine — but the bar is universal, not "common".
+
+---
+
 ## Model Structure
 
 Every model follows this exact ordering of members:
@@ -25,21 +60,23 @@ Every model follows this exact ordering of members:
 ```python
 from django.db import models
 
+from config.models import BaseModel
 
-class MyEntity(models.Model):
+
+class MyEntity(BaseModel):
     # 1. Choices — inner enum classes, declared inline so they live next to their fields
     class Status(models.TextChoices):
         DRAFT = "draft", "Draft"
         PUBLISHED = "published", "Published"
 
     # 2. Fields, in this sub-order: identifiers → time → status → domain → relations
+    #    (created_at / updated_at are inherited from BaseModel)
 
     # Identifiers — slugs, external refs (PK is handled by Django's BigAutoField)
     slug = models.SlugField(max_length=255)
 
-    # Time fields — created, updated, any dates/datetimes
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    # Time fields — only domain-specific timestamps beyond created_at / updated_at
+    published_at = models.DateTimeField(null=True, blank=True)
 
     # Workflow / status / state (if applicable) — uses the inline Status above
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT)
@@ -114,7 +151,7 @@ class Meta:
 Fields are grouped by role, in this order:
 
 1. **Identifiers** — slugs, external reference codes, SKUs (NOT the primary key — that's auto-generated)
-2. **Time fields** — `created_at`, `updated_at`, `published_at`, any date or datetime
+2. **Time fields** — domain-specific timestamps like `published_at`, `paid_at`. `created_at` and `updated_at` are inherited from `BaseModel` and don't appear in the body.
 3. **Workflow / status / state** — `status`, `stage`, `is_active`, `is_published` (skip if the model has no lifecycle)
 4. **Domain fields** — everything else: `name`, `description`, `price`, `quantity`, etc.
 5. **Relations** — `ForeignKey`, `OneToOneField`, `ManyToManyField` — always last among fields
@@ -234,13 +271,13 @@ class OrderItemInline(admin.TabularInline):
 
 @admin.register(Order)
 class OrderAdmin(admin.ModelAdmin):
-    list_display = ("id", "date", "total")
+    list_display = ("id", "created_at", "total")
     list_per_page = 25
     search_fields = ("id",)
-    readonly_fields = ("id",)
-    ordering = ("-date",)
+    readonly_fields = ("id", "created_at", "updated_at")
+    ordering = ("-created_at",)
     fieldsets = (
-        (None, {"fields": ("id", "date")}),
+        (None, {"fields": ("id", "created_at", "updated_at")}),
         ("Details", {"fields": ("total",)}),
     )
     inlines = [OrderItemInline]
@@ -251,9 +288,9 @@ class OrderAdmin(admin.ModelAdmin):
 - **`list_display`** — `id` first, then the most useful columns. 4-6 fields max.
 - **`list_per_page = 25`** — keeps the admin snappy on large tables.
 - **`search_fields`** — always include `id`. Never search on unindexed columns.
-- **`readonly_fields`** — always include `id`. Add computed or auto-set fields.
-- **`ordering`** — explicit, usually `-created_at` or the most natural time field.
-- **`fieldsets`** — place `id` and timestamps in the first (untitled) fieldset at the top.
+- **`readonly_fields`** — always include `id`, `created_at`, `updated_at` (the last two are auto-managed by `BaseModel`). Add any other computed or auto-set fields.
+- **`ordering`** — explicit, default `("-created_at",)` since every model has the field via `BaseModel`. Override only when a different time field reads more naturally (e.g. `-published_at`).
+- **`fieldsets`** — place `id`, `created_at`, `updated_at` in the first (untitled) fieldset at the top.
 - **`list_select_related`** — specify FKs shown in `list_display` to avoid N+1 queries.
 - **`raw_id_fields`** — use for any FK to a large table.
 - **`extra = 0`** on inlines — never show empty inline forms by default.
@@ -268,8 +305,10 @@ class OrderAdmin(admin.ModelAdmin):
 ```python
 from django.db import models
 
+from config.models import BaseModel
 
-class Order(models.Model):
+
+class Order(BaseModel):
     # Choices
     class Status(models.TextChoices):
         PENDING = "pending", "Pending"
@@ -284,8 +323,8 @@ class Order(models.Model):
         help_text="Client-generated key to prevent duplicate order submissions.",
     )
 
-    # Time
-    date = models.DateTimeField(auto_now_add=True)
+    # Time (created_at / updated_at inherited from BaseModel)
+    paid_at = models.DateTimeField(null=True, blank=True)
 
     # Status
     status = models.CharField(
@@ -301,8 +340,8 @@ class Order(models.Model):
         verbose_name = "order"
         verbose_name_plural = "orders"
         indexes = [
-            models.Index(fields=["-date"], name="idx_%(class)s_recent"),
-            models.Index(fields=["status", "-date"], name="idx_%(class)s_status_recent"),
+            models.Index(fields=["-created_at"], name="idx_%(class)s_recent"),
+            models.Index(fields=["status", "-created_at"], name="idx_%(class)s_status_recent"),
         ]
         constraints = [
             models.UniqueConstraint(
@@ -312,10 +351,10 @@ class Order(models.Model):
         ]
 
     def __str__(self) -> str:
-        return f"Order {self.id} on {self.date}"
+        return f"Order {self.id} ({self.created_at:%Y-%m-%d})"
 
 
-class OrderItem(models.Model):
+class OrderItem(BaseModel):
     # Domain
     quantity = models.PositiveIntegerField()
     price_at_purchase = models.DecimalField(
@@ -354,6 +393,7 @@ make test
 
 ## Checklist
 
+- [ ] Inherits from `config.models.BaseModel` (not `models.Model` directly)
 - [ ] Member order: choices → fields → manager (rare) → Meta → methods
 - [ ] Inline `TextChoices` / `IntegerChoices` classes appear before fields, used by name in their field's `choices=`
 - [ ] `verbose_name` and `verbose_name_plural` are set

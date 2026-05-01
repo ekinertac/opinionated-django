@@ -122,10 +122,6 @@ Runs `ruff check`, `ruff format --check`, and `pyrefly check`, then fixes whatev
 - **Reliable Signals** — Side-effects enqueued inside the DB transaction via Celery. At-least-once delivery. Idempotent receivers.
 - **Settings** — Split into base/local/production. Sectioned with banner headers. `python-decouple` for env vars.
 
-## Example Project
-
-See [`example_project`](./example_project) for a working Django project built with these patterns — two apps (`products`, `orders`), full repository + service + API layering, and tests at all three levels.
-
 ## License
 
 [MIT](./LICENSE).
