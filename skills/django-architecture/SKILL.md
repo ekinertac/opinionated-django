@@ -10,7 +10,7 @@ You are implementing a feature in an opinionated Django project managed with `uv
 
 **Why this architecture exists:** Django's ORM is powerful but hard to type — querysets, model instances, related managers, and `F()`/`Q()` expressions don't play well with static type checkers. This project solves that by pushing all ORM usage into repositories that return Pydantic DTOs. Services receive repos via constructor injection and contain pure business logic with zero ORM imports. Views are thin dispatchers. The result: everything from the repository boundary outward is fully typed, IDE-friendly, and testable in isolation.
 
-**Tooling:** `uv` is the package manager. Local development runs entirely in Docker Compose, with a Makefile wrapping the common commands (`make test`, `make migrate`, `make check`, etc.). Never use `pip`, `poetry`, or raw `python`. To add a dependency: `docker compose run --rm web uv add <package>`. See the `django-docker` skill for the Compose stack and the full Makefile target list.
+**Tooling:** `uv` is the package manager. Local development runs entirely in Docker Compose, with a Makefile wrapping the common commands (`make test`, `make migrate`, `make check`, etc.). Never use `pip`, `poetry`, or raw `python`. To add a dependency: `docker compose exec web uv add <package>` (then `make build` to rebuild the image with the new deps). See the `django-docker` skill for the Compose stack and the full Makefile target list.
 
 ## BEFORE WRITING CODE
 

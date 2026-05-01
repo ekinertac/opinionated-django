@@ -25,7 +25,7 @@ All commands run inside the `web` container — the project uses Docker Compose 
 ## Dependencies
 
 ```bash
-docker compose run --rm web uv add --dev pytest pytest-django pytest-celery freezegun pytest-mock
+docker compose exec web uv add --dev pytest pytest-django pytest-celery freezegun pytest-mock
 ```
 
 ## Configuration
