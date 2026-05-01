@@ -76,7 +76,7 @@ Skills install with a single command:
 npx skills add ekinertac/opinionated-django
 
 # Or just one
-npx skills add ekinertac/opinionated-django/django-scaffold|django-docker|django-architecture|django-models|django-repositories|django-services|django-signals|django-settings|django-pytest|django-lint|django-deploy
+npx skills add ekinertac/opinionated-django/django-scaffold|django-docker|django-architecture|django-models|django-repositories|django-services|django-api|django-signals|django-settings|django-pytest|django-lint|django-deploy
 ```
 
 Your agent will pick them up automatically on its next run. You can also clone the repo and point your agent at `skills/` directly.
@@ -102,6 +102,9 @@ The boundary where ORM objects die and DTOs are born. One class per aggregate ro
 
 ### `django-services`
 Plain service classes with constructor-injected repositories, wired through an [svcs](https://svcs.hynek.me) registry. Business logic lives here, zero ORM imports allowed. Resolve anywhere — views, Celery tasks, management commands, tests — with a single generic `get[T]()` call.
+
+### `django-api`
+DRF Serializers for input validation, `viewsets.ViewSet` (never `ModelViewSet`) as thin dispatchers to services, URL routing with `drf-nested-routers` for nested resources, two-tier permissions (DRF classes for request-level, service exceptions for data-level), error mapping through the central exception handler, OpenAPI schemas via `drf-spectacular` + `drf-pydantic`, URL-path API versioning, and file-upload patterns including S3 signed URLs for large files.
 
 ### `django-signals`
 Reliable signals for async side-effects — notifications, cache invalidation, analytics, cross-service coordination. Receivers are enqueued **inside** the database transaction via Celery, so rollbacks are respected and delivery is at-least-once.

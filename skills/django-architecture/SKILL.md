@@ -130,84 +130,20 @@ def _my_entity_service_factory(container: svcs.Container) -> MyEntityService:
 registry.register_factory(MyEntityService, _my_entity_service_factory)
 ```
 
-### Layer 6: API Views
+### Layer 6: API (Serializers + ViewSets)
 
-Views live inside the app — `src/apps/<app>/views.py`, `src/apps/<app>/serializers.py`, `src/apps/<app>/urls.py`.
+Files: `src/apps/<app>/serializers.py`, `src/apps/<app>/views.py`, `src/apps/<app>/urls.py`.
 
-`src/apps/<app>/views.py`:
+Follow the **django-api** skill for full conventions, examples, and the checklist. The irreducible rules:
 
-```python
-from rest_framework import status, viewsets
-from rest_framework.response import Response
-
-from config.services import get
-
-from .services import MyEntityService
-from .serializers import CreateMyEntitySerializer
-
-
-class MyEntityViewSet(viewsets.ViewSet):
-    def list(self, request):
-        dtos = get(MyEntityService).list_entities()
-        return Response([dto.model_dump() for dto in dtos])
-
-    def create(self, request):
-        serializer = CreateMyEntitySerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        dto = get(MyEntityService).create_entity(**serializer.validated_data)
-        return Response(dto.model_dump(), status=status.HTTP_201_CREATED)
-
-    def retrieve(self, request, pk=None):
-        dto = get(MyEntityService).get_entity(pk)
-        return Response(dto.model_dump())
-```
-
-`src/apps/<app>/serializers.py`:
-
-```python
-from rest_framework import serializers
-
-
-class CreateMyEntitySerializer(serializers.Serializer):
-    name = serializers.CharField()
-```
-
-`src/apps/<app>/urls.py`:
-
-```python
-from rest_framework.routers import DefaultRouter
-
-from .views import MyEntityViewSet
-
-router = DefaultRouter()
-router.register(r"my-entities", MyEntityViewSet, basename="my-entity")
-
-urlpatterns = router.urls
-```
-
-Then include in `src/config/urls.py`:
-
-```python
-path("api/", include("apps.myapp.urls")),
-```
-
-For nested resources, use `drf-nested-routers`:
-
-```python
-from rest_framework_nested import routers
-
-router = routers.DefaultRouter()
-router.register(r"orders", OrderViewSet, basename="order")
-
-orders_router = routers.NestedDefaultRouter(router, r"orders", lookup="order")
-orders_router.register(r"items", OrderItemViewSet, basename="order-items")
-
-urlpatterns = router.urls + orders_router.urls
-```
-
-RULES:
-- ViewSets do NOT try/except — errors bubble up to the central exception handler in `src/config/exception_handler.py`
-- Services raise `ValueError` → 400, `LookupError` → 404, `PermissionError` → 403
+- Use `serializers.Serializer` for input validation. **NEVER `ModelSerializer`.**
+- Use `viewsets.ViewSet` (bare). **NEVER `ModelViewSet` / `GenericViewSet` with a `queryset`** — those couple the view to the ORM and bypass the repo + service stack.
+- Each action method: validate via the Serializer, dispatch to a service via `get(SomeService)`, return `dto.model_dump()`. No business logic, no ORM imports, no try/except.
+- Output is `dto.model_dump()` — never a Serializer instance.
+- Pass `user_id=request.user.id` to services that need it. Services stay HTTP-unaware.
+- Permissions are two-tier: DRF `permission_classes` for request-level (auth, role); services raise `PermissionError` for data-level ("does this user own this row?").
+- Apps register their own router in `urls.py`; `config/urls.py` mounts them under `api/v1/`. Use `drf-nested-routers` for nested resources.
+- Annotate actions with `@extend_schema(responses={...: DTO.drf_serializer})` so OpenAPI docs reflect the actual output shape.
 
 ### Layer 7: Admin
 
