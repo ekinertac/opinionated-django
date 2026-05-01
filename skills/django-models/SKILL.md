@@ -198,6 +198,20 @@ Models contain ZERO business logic:
 - No properties that compute
 - `__str__` is the only method allowed
 
+#### Where it lives instead
+
+Each thing the model is *not* allowed to do has a specific home elsewhere in the project. When the agent feels the urge to add logic to a model, it goes here:
+
+| Banned on the model | Lives in | Why there |
+|---|---|---|
+| Custom manager / `objects = MyManager()` / `QuerySet` subclasses | **Repository** (`apps/<app>/repositories.py`) | All ORM access is repository-only. Query helpers become repository methods (`active()`, `for_user(id)`) returning DTOs, not querysets. |
+| `save()` override / pre-save normalization / cross-field invariants | **Service** (`apps/<app>/services.py`) | Services orchestrate writes — validate inputs, normalize, call `repo.create(...)`, raise `ValueError`/`PermissionError` on bad state. The exception handler maps those to HTTP. |
+| `pre_save` / `post_save` / `pre_delete` / `post_delete` signals | **Reliable signals + receivers** (`config/signals.py` + `apps/<app>/receivers.py`) | Receivers are Celery tasks enqueued in the same DB transaction as the service write. At-least-once delivery, idempotent. See **django-signals**. |
+| Computed `@property` (`full_name`, `is_overdue`, `total_with_tax`) | **DTO** (`apps/<app>/dtos.py`) — Pydantic computed field, **or** service method that derives the value | Computed values are output, not state. Putting them on the DTO keeps the model a thin row of stored fields and the derivation visible at the API boundary. |
+| Validators that depend on other rows / external state | **Service** (in the create/update method) | Field validators on the model can't see request context or sibling data; the service can. |
+
+Field-level `MaxValueValidator` / `MinValueValidator` / `RegexValidator` and `models.CheckConstraint` in `Meta.constraints` are NOT business logic — they're declarative database/field rules. Those stay on the model.
+
 ---
 
 ## Admin Registration

@@ -50,6 +50,7 @@ Follow the **django-models** skill for full conventions. The key rules:
 - All indexes in `Meta.indexes` — never `db_index=True` on fields
 - ZERO business logic — no custom managers, no `save()` overrides, no signals, no properties that compute
 - `__str__` is the only method allowed
+- Each banned thing has a specific home elsewhere: query helpers → **repository**, write-time invariants/normalization → **service**, post-write side-effects → **reliable signals + receivers**, computed values → **DTO** (Pydantic computed field) or service method. See `django-models` → "Where it lives instead" for the full mapping.
 
 ```python
 from django.db import models
