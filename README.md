@@ -76,7 +76,7 @@ Skills install with a single command:
 npx skills add ekinertac/opinionated-django
 
 # Or just one
-npx skills add ekinertac/opinionated-django/django-scaffold|django-docker|django-architecture|django-models|django-repositories|django-services|django-signals|django-settings|django-pytest|django-lint
+npx skills add ekinertac/opinionated-django/django-scaffold|django-docker|django-architecture|django-models|django-repositories|django-services|django-signals|django-settings|django-pytest|django-lint|django-deploy
 ```
 
 Your agent will pick them up automatically on its next run. You can also clone the repo and point your agent at `skills/` directly.
@@ -114,6 +114,9 @@ Three-layer pytest setup — `test_repo.py`, `test_service.py`, `test_api.py` �
 
 ### `django-lint`
 Runs `ruff check`, `ruff format --check`, and `pyrefly check`, then fixes whatever it finds. Use before committing, or any time you want a clean bill of health.
+
+### `django-deploy`
+Mid-scale production deployment — multi-stage Dockerfile, gunicorn, S3 for static and media, Sentry, JSON logging, `/healthz` and `/readyz` endpoints, and an Ansible playbook with Vault-encrypted secrets that does a rolling deploy across multiple web hosts behind a cloud load balancer with a separate Celery worker host. Provisioning is out of scope — point at community roles for Docker, firewall, swap.
 
 ## The Patterns at a Glance
 
