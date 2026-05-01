@@ -327,8 +327,8 @@ def test_expires_at_is_24h_from_now():
 ## Verify
 
 ```bash
-make test                                                        # full suite
-docker compose run --rm web uv run pytest -m "not slow"          # fast loop
-docker compose run --rm web uv run pytest src/apps/orders/       # one app
-docker compose run --rm web uv run pytest --lf                   # re-run last failures
+make test                                                  # full suite
+docker compose exec web uv run pytest -m "not slow"        # fast loop
+docker compose exec web uv run pytest src/apps/orders/     # one app
+docker compose exec web uv run pytest --lf                 # re-run last failures
 ```

@@ -223,55 +223,57 @@ logs: ## Tail logs from all services
 	docker compose logs -f
 
 # ---- shells ----
-shell: ## Open Django shell in a one-off web container
-	docker compose run --rm web uv run python manage.py shell
+shell: ## Open Django shell in the running web container
+	docker compose exec web uv run python manage.py shell
 
 bash: ## Open bash inside the running web container
 	docker compose exec web bash
 
 # ---- django ----
 migrate: ## Apply pending migrations
-	docker compose run --rm web uv run python manage.py migrate
+	docker compose exec web uv run python manage.py migrate
 
 makemigrations: ## Create migrations from model changes
-	docker compose run --rm web uv run python manage.py makemigrations
+	docker compose exec web uv run python manage.py makemigrations
 
 superuser: ## Create a Django superuser
-	docker compose run --rm web uv run python manage.py createsuperuser
+	docker compose exec web uv run python manage.py createsuperuser
 
 # ---- quality ----
 test: ## Run the pytest suite
-	docker compose run --rm web uv run pytest
+	docker compose exec web uv run pytest
 
 lint: ## Lint with ruff
-	docker compose run --rm web uv run ruff check .
+	docker compose exec web uv run ruff check .
 
 format: ## Auto-format with ruff
-	docker compose run --rm web uv run ruff format .
+	docker compose exec web uv run ruff format .
 
 format-check: ## Verify formatting (no changes)
-	docker compose run --rm web uv run ruff format --check .
+	docker compose exec web uv run ruff format --check .
 
 typecheck: ## Static type analysis with pyrefly
-	docker compose run --rm web uv run pyrefly check src
+	docker compose exec web uv run pyrefly check src
 
 check: lint format-check typecheck ## Lint + format check + typecheck (read-only pre-commit gate)
 
 # ---- data ----
 resetdb: ## Destroy and recreate the postgres volume, then migrate
 	docker compose down -v
-	docker compose up -d postgres
-	docker compose run --rm web uv run python manage.py migrate
+	docker compose up -d
+	@echo "Stack is up; entrypoint already ran migrate on web."
 
 psql: ## Open psql against the postgres service
 	docker compose exec postgres sh -c 'psql -U $$POSTGRES_USER $$POSTGRES_DB'
 ```
 
 Notes:
+- **Stack must be up.** Targets use `docker compose exec`, which runs inside an already-running container. Run `make up-d` first; subsequent `make test` / `make migrate` / etc. are fast because they reuse the live container instead of spinning up a one-off. If the stack is down, `exec` errors out — by design, so it's obvious the project isn't running.
 - `help` is the default convention — `make help` prints every target with its `##` description. Keep new targets tagged so they show up.
 - `$$` in `psql` escapes Make so the shell inside the postgres container sees `$POSTGRES_USER` / `$POSTGRES_DB` and expands them against the container's env.
-- `check` chains `lint typecheck` — useful as a single pre-commit gate. Add `test` to it once test runtime is acceptable.
+- `check` chains `lint format-check typecheck` — useful as a single pre-commit gate. Add `test` to it once test runtime is acceptable.
 - All targets are `.PHONY` because none produce files. Skipping `.PHONY` causes silent breakage when a directory matches a target name.
+- `resetdb` relies on the entrypoint's gated migrate (`RUN_MIGRATIONS=true` on web) — `docker compose up -d` brings the stack up and migrations run automatically as part of the web container's startup.
 
 ## Step 6: `.env.example`
 
@@ -301,8 +303,11 @@ After scaffolding, the user copies it: `cp .env.example .env`.
 
 Use the Makefile. `make help` lists every target.
 
+**Bring the stack up first** (`make up-d`); the rest of the targets use `docker compose exec` and need a running web container.
+
 ```bash
-make up            # start the stack
+make up            # start the stack (foreground)
+make up-d          # start the stack (detached) — run this first
 make down          # stop it (postgres volume kept)
 make build         # rebuild image after dep changes
 make logs          # tail all service logs
@@ -320,17 +325,21 @@ make format-check  # ruff format --check (no changes)
 make typecheck     # pyrefly
 make check         # lint + format-check + typecheck
 
-make resetdb       # nuke postgres volume and re-migrate
+make resetdb       # nuke postgres volume and re-migrate (via entrypoint)
 make psql          # psql into the postgres service
 ```
 
-Anything not covered by a target falls through to the raw form, e.g. adding a dep:
+Anything not covered by a target falls through to a raw `docker compose exec`:
+
+```bash
+docker compose exec web uv run pytest -m "not slow"
+```
+
+For commands that need to work when the stack is down — most notably dependency installs during initial scaffolding — use `run --rm` instead:
 
 ```bash
 docker compose run --rm web uv add <package>
 ```
-
-`--rm` removes the throwaway container after the command exits — without it, stopped containers pile up. The Makefile already includes `--rm` everywhere.
 
 ## How Settings Wire to Compose
 
@@ -356,6 +365,7 @@ Inside the `web` container, `postgres` and `redis` resolve via Compose's built-i
 
 ## Rules
 
+- Use `docker compose exec web <cmd>` against a running stack. Reserve `docker compose run --rm web <cmd>` for the rare commands that must work when the stack is down — `uv add` during initial setup, `manage.py startapp` for new apps. Mixing the two casually is the wrong default; `exec` is faster and shares state with the live container.
 - `psycopg[binary]>=3.2` must be in dependencies (Postgres driver). Add via `uv add 'psycopg[binary]'`.
 - Do NOT commit `.env`. Do commit `.env.example`.
 - All postgres credentials (`POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`) come from `.env` — never hardcode them in `docker-compose.yml`, never use Compose's `${VAR:-default}` interpolation. The postgres service uses `env_file: .env` like every other service. Single source of truth.
@@ -369,9 +379,8 @@ Inside the `web` container, `postgres` and `redis` resolve via Compose's built-i
 ```bash
 make build
 make up-d
-make migrate
-docker compose run --rm web uv run python manage.py check
+docker compose exec web uv run python manage.py check
 make down
 ```
 
-All five steps must succeed.
+The entrypoint runs `migrate` automatically when the web container starts (because `RUN_MIGRATIONS=true`), so an explicit `make migrate` step isn't needed here. All four steps must succeed.
