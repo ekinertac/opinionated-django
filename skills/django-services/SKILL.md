@@ -10,7 +10,7 @@ This project separates Django's framework concerns from business logic using a p
 
 - **Views are one-liners.** They pull a wired service and call a method.
 - **Services contain the business logic.** They take repositories (and other services) via `__init__`, call methods on them, and return DTOs.
-- **Services never import Django ORM or models.** Every test can run without a database.
+- **Services never import Django ORM or models.** All ORM access lives behind the repository, so the service is fully typed and easy to read in isolation. Service tests still use the real test database via real repositories — see **django-pytest**.
 - **One registry, one `get[T]()` helper.** The same call works in views, tasks, commands, anywhere.
 
 ## Why svcs Instead of Module-Level Singletons or a Custom Container
@@ -193,61 +193,54 @@ The same `get()` call works in all three contexts because the registry is global
 
 ## Testing
 
-Services are tested **without a database**. Pass in a `MagicMock` for each repository.
+Services are tested with **real repositories against the test DB** — not mocks of internal layers. The repo / service / DTO boundary already provides isolation; mocking on top of it hides bugs the real call would expose. See **django-pytest** for the full rationale.
 
 ```python
 from decimal import Decimal
-from unittest.mock import MagicMock
 
 import pytest
 
-from apps.products.dtos import ProductDTO
+from apps.products.repositories import ProductRepository
 from apps.products.services import ProductService
 
 
-def test_create_product_delegates_to_repo():
-    repo = MagicMock()
-    expected = ProductDTO(id=1, name="Widget", price=Decimal("9.99"), stock=5)
-    repo.create.return_value = expected
+@pytest.mark.django_db
+def test_create_product():
+    service = ProductService(ProductRepository())
 
-    service = ProductService(repo)
-    result = service.create_product(name="Widget", price=Decimal("9.99"), stock=5)
+    dto = service.create_product(name="Widget", price=Decimal("9.99"), stock=5)
 
-    assert result is expected
-    repo.create.assert_called_once_with(name="Widget", price=Decimal("9.99"), stock=5)
+    assert dto.name == "Widget"
 
 
-def test_create_order_rejects_insufficient_stock():
-    order_repo = MagicMock()
-    product_repo = MagicMock()
-    product_repo.get_by_id.return_value = ProductDTO(
-        id=1, name="Widget", price=Decimal("9.99"), stock=1
-    )
-
-    service = OrderService(order_repo, product_repo)
+@pytest.mark.django_db
+def test_create_order_rejects_insufficient_stock(make_product):
+    product = make_product(stock=1)
+    service = OrderService(OrderRepository(), ProductRepository())
 
     with pytest.raises(ValueError, match="Insufficient stock"):
-        service.create_order(items=[{"product_id": 1, "quantity": 5}])
-
-    order_repo.create.assert_not_called()
+        service.create_order(items=[{"product_id": product.id, "quantity": 5}])
 ```
 
-If a service's tests need `@pytest.mark.django_db`, something has leaked: find the ORM call and push it back into a repository.
+- Pass repositories into the service constructor explicitly. The wiring matches production; the test just constructs locally instead of going through `get(ServiceType)`.
+- Use `make_*` builder fixtures (defined in `src/conftest.py`) to seed prerequisite rows. See **django-pytest** for the conftest setup.
+- Assert on the exception **type and message fragment** for invariant violations.
 
-### Overriding a Service in Tests
+### Mocks Belong at External Boundaries
 
-For integration tests that go through the API, override a factory:
+If a service calls a third-party API (Stripe, Twilio, mail provider), mock *that* dependency — not the service, not its repos. When the external dep is itself a service registered with `svcs`, use `override_service` from the project conftest:
 
 ```python
-from config.services import registry
-from apps.products.services import ProductService
+def test_checkout_charges_card(override_service, make_product):
+    fake = MagicMock(spec=PaymentService)
+    fake.charge.return_value = ChargeResult(...)
+    override_service(PaymentService, fake)
 
+    # ...real CheckoutService + real repos + real DB:
+    service = CheckoutService(OrderRepository(), get(PaymentService))
+    service.checkout(...)
 
-@pytest.fixture
-def fake_product_service():
-    fake = MagicMock(spec=ProductService)
-    registry.register_factory(ProductService, lambda _: fake)
-    yield fake
+    fake.charge.assert_called_once()
 ```
 
 ## Common Mistakes

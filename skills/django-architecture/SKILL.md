@@ -243,22 +243,33 @@ def test_create_and_get():
     assert fetched == dto
 ```
 
-### `test_service.py` — Mock the repos, validate business logic
+### `test_service.py` — Real repo + real DB, validate business logic
 
 ```python
-from unittest.mock import MagicMock
+import pytest
 
-def test_create_delegates_to_repo():
-    repo = MagicMock()
-    expected = MyEntityDTO(id=1, name="Test")
-    repo.create.return_value = expected
+from apps.myapp.repositories import MyEntityRepository
+from apps.myapp.services import MyEntityService
 
-    service = MyEntityService(repo)
-    result = service.create_entity(name="Test")
 
-    assert result == expected
-    repo.create.assert_called_once_with(name="Test")
+@pytest.mark.django_db
+def test_create_entity():
+    service = MyEntityService(MyEntityRepository())
+
+    dto = service.create_entity(name="Test")
+
+    assert dto.name == "Test"
+
+
+@pytest.mark.django_db
+def test_create_entity_rejects_blank_name():
+    service = MyEntityService(MyEntityRepository())
+
+    with pytest.raises(ValueError, match="name"):
+        service.create_entity(name="")
 ```
+
+Service tests use the real repository and the test DB — no internal mocks. Mocks only at *external* boundaries (third-party APIs, payment SDKs). See **django-pytest** for the rationale and the full conftest.
 
 ### `test_api.py` — Integration through HTTP
 
@@ -308,6 +319,6 @@ make test
 - [ ] App in `INSTALLED_APPS` (if new) using short dotted path (`"apps.<app>"`)
 - [ ] Migrations generated and applied
 - [ ] `test_repo.py`: real DB, asserts DTO type
-- [ ] `test_service.py`: mocked repos, tests business logic
+- [ ] `test_service.py`: real repo + real DB, tests business logic and exception types
 - [ ] `test_api.py`: HTTP integration with `APIClient`, asserts status codes + response shape
 - [ ] `ruff check`, `ruff format --check`, `pyrefly check`, `pytest` all pass

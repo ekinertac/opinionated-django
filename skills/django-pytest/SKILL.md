@@ -1,26 +1,42 @@
 ---
 name: django-pytest
-description: Set up and write pytest tests for a Django project — pytest-django configuration, Celery eager mode for reliable-signal tests, freezegun for time-sensitive logic, shared conftest fixtures for DTOs and svcs overrides, and the three-layer test convention (repository against a real DB, service against mocked repos, API through HTTP). Use when adding tests to a new project, writing tests for a new feature, setting up test infrastructure, or explaining how tests should be organized.
+description: Set up and write pytest tests for a Django project — pytest-django configuration, Celery eager mode for reliable-signal tests, freezegun for time-sensitive logic, builder fixtures for real database rows, the three-layer test convention (repository, service, API), and the rule that mocks belong at external boundaries only. Use when adding tests to a new project, writing tests for a new feature, setting up test infrastructure, or explaining how tests should be organized.
 allowed-tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 
 # Pytest for Django
 
-Testing in this project is layered the same way the code is. Each layer has its own rules, its own fixtures, and its own performance characteristics. The goal is to keep the fast tests fast — service tests should never touch a database — and to isolate the slow tests at the edges.
+Each test layer focuses on a different concern. **All layers hit the test database.** The project's repository / service / DTO discipline doesn't need mocks of internal layers to stay clean — the typed boundaries do that work already. Mocks are reserved for *external* dependencies: HTTP clients, payment SDKs, mail providers.
 
 ## The Three Layers
 
-| File | What it covers | DB? | Speed |
-|---|---|---|---|
-| `test_repo.py` | ORM ↔ DTO conversion, prefetches, transactions | ✅ real | slow |
-| `test_service.py` | Business logic, validation, orchestration | ❌ mocked | fast |
-| `test_api.py` | HTTP integration — request → view → service → repo | ✅ real | slow |
+| File | What it tests | Strategy |
+|---|---|---|
+| `test_repo.py` | ORM ↔ DTO conversion, prefetches, transactions, query helpers, `coerce_related_manager` round-trip | Real repo, real DB rows, assert on DTO shape |
+| `test_service.py` | Business logic: validation, orchestration, exception types, cross-repo coordination | Real repos + real DB; mock only at external boundaries |
+| `test_api.py` | HTTP integration: serializer validation, status codes, response shape, exception handler mapping | DRF `APIClient`, full real round-trip |
 
-Service tests are the most valuable layer and should outnumber the others. If a service test needs `@pytest.mark.django_db`, something has leaked — find the ORM call and push it into a repository.
+The earlier "service tests use mocked repos" rule has been removed. Mocking your own repositories sounded principled — fast tests, isolated units — but the mocks returned whatever the test set up, not what the real repo would have returned. Bugs in prefetches, missing fields, wrong types: all hidden. Tests passed; production broke. Real DB closes that gap, and the cost is bounded by:
+
+- **`--reuse-db`** keeps the test schema across runs (schema setup is the slow part, not the tests).
+- **`@pytest.mark.django_db`** (default `transaction=False`) wraps each test in a transaction that rolls back at the end — fast.
 
 Tests live inside each app: `src/apps/<app>/tests/test_repo.py`, `test_service.py`, `test_api.py`.
 
-All commands run inside the `web` container — the project uses Docker Compose for local development. Outside Compose, `postgres` and `redis` won't resolve. See the `django-docker` skill for the stack and the Makefile that wraps the common commands.
+All commands run inside the `web` container — see the `django-docker` skill for the stack and the Makefile.
+
+## Where Mocks Still Belong
+
+Mocks at **external** boundaries only:
+
+- ✅ Mock an HTTP client to a third-party API (Stripe, Twilio, SendGrid)
+- ✅ Mock a Celery `.delay()` when verifying enqueue (the receiver itself gets its own real-execution test)
+- ✅ Mock the system clock — but use `freezegun`, not `MagicMock(datetime)`
+- ❌ Mock your own `Repository`
+- ❌ Mock your own `Service` from another service
+- ❌ Mock the ORM — use the test DB
+
+If a test needs an internal mock to pass, the design has a coupling problem. Fix the design, not the test.
 
 ## Dependencies
 
@@ -29,8 +45,6 @@ docker compose exec web uv add --dev pytest pytest-django pytest-celery freezegu
 ```
 
 ## Configuration
-
-Add to `pyproject.toml`:
 
 ```toml
 [tool.pytest.ini_options]
@@ -41,6 +55,7 @@ addopts = [
     "-ra",
     "--strict-markers",
     "--strict-config",
+    "--reuse-db",
 ]
 markers = [
     "slow: deselect with '-m \"not slow\"'",
@@ -48,8 +63,17 @@ markers = [
 ```
 
 Notes:
-- `pythonpath = ["src"]` is what lets `from config.services import get` resolve without an editable install.
+- `pythonpath = ["src"]` lets `from config.services import get` resolve without an editable install.
 - `--strict-markers` catches typos in `@pytest.mark.xxx`. `--strict-config` does the same for the config file.
+- `--reuse-db` keeps the test database between runs — schema is created once, reused. Pass `--create-db` after a migration to force a fresh build.
+
+## Speed Tactics
+
+- **`--reuse-db`** — single biggest win, already in `addopts`.
+- **`@pytest.mark.django_db`** with the default `transaction=False` rolls back per-test via a transaction. Faster than `transaction=True`.
+- **`@pytest.mark.django_db(transaction=True)`** only when needed (typically reliable-signal tests where `transaction.on_commit` must fire).
+- **`pytest-xdist`** for parallelization once the suite gets long: `docker compose exec web uv run pytest -n auto`. Only worth it past ~5 seconds of total runtime.
+- **`@pytest.mark.slow`** on genuinely slow tests, then skip them in tight loops with `-m "not slow"`.
 
 ## Celery in Tests
 
@@ -60,7 +84,7 @@ CELERY_TASK_ALWAYS_EAGER = True
 CELERY_TASK_EAGER_PROPAGATES = True
 ```
 
-With eager mode on, `send_reliable()` still goes through `transaction.on_commit`, so tests that exercise reliable signals must run inside `@pytest.mark.django_db` with `transaction=True` so `on_commit` actually fires.
+With eager mode on, `send_reliable()` still goes through `transaction.on_commit`, so tests that exercise reliable signals must run inside `@pytest.mark.django_db(transaction=True)` so `on_commit` actually fires.
 
 ## `conftest.py`
 
@@ -71,12 +95,12 @@ from __future__ import annotations
 
 from decimal import Decimal
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 from freezegun import freeze_time
 
 from apps.products.dtos import ProductDTO
+from apps.products.repositories import ProductRepository
 
 
 # ---- time --------------------------------------------------------------
@@ -88,18 +112,64 @@ def frozen_time():
         yield frozen
 
 
-# ---- svcs --------------------------------------------------------------
+# ---- builders that hit the real DB -------------------------------------
+
+@pytest.fixture
+def make_product():
+    """Create a real Product row and return its DTO. Default for service/API tests."""
+    repo = ProductRepository()
+
+    def _build(**overrides: Any) -> ProductDTO:
+        fields: dict[str, Any] = {
+            "name": "Widget",
+            "price": Decimal("9.99"),
+            "stock": 5,
+        }
+        fields.update(overrides)
+        return repo.create(**fields)
+
+    return _build
+
+
+# ---- DTO builders that DO NOT hit the DB -------------------------------
+
+@pytest.fixture
+def make_product_dto():
+    """Build a ProductDTO without touching the DB.
+
+    Reach for this only in narrow cases — typically when you need a DTO shape
+    that's awkward to seed (e.g., a DTO with an id that intentionally doesn't
+    exist in the DB, for testing an explicit "not found" path before the
+    repo call). Most tests should use `make_product` instead.
+    """
+    def _build(**overrides: Any) -> ProductDTO:
+        fields: dict[str, Any] = {
+            "id": 1,
+            "name": "Widget",
+            "price": Decimal("9.99"),
+            "stock": 5,
+        }
+        fields.update(overrides)
+        return ProductDTO(**fields)
+
+    return _build
+
+
+# ---- service overrides (external boundaries only) ----------------------
 
 @pytest.fixture
 def override_service():
-    """
-    Swap a real service factory for a fake for the duration of a test.
+    """Substitute a service factory for the duration of a test.
+
+    Use ONLY when the service being substituted wraps an external boundary
+    (third-party API, payment provider, mail sender). Do NOT use this to
+    short-circuit internal layers — write real-DB tests instead.
 
     Usage:
-        def test_something(override_service):
-            fake = MagicMock(spec=ProductService)
-            fake.list_products.return_value = []
-            override_service(ProductService, fake)
+        def test_checkout_flow(override_service):
+            fake = MagicMock(spec=PaymentService)
+            fake.charge.return_value = ChargeResult(...)
+            override_service(PaymentService, fake)
             ...
     """
     from config.services import registry
@@ -115,50 +185,17 @@ def override_service():
     for service_type, original in originals.items():
         if original is not None:
             registry._factories[service_type] = original
-
-
-# ---- DTO builders ------------------------------------------------------
-
-@pytest.fixture
-def make_product_dto():
-    """Build a ProductDTO with sensible defaults; override anything via kwargs."""
-
-    def _build(**overrides: Any) -> ProductDTO:
-        fields: dict[str, Any] = {
-            "id": 1,
-            "name": "Widget",
-            "price": Decimal("9.99"),
-            "stock": 5,
-        }
-        fields.update(overrides)
-        return ProductDTO(**fields)
-
-    return _build
-
-
-# ---- repository mocks --------------------------------------------------
-
-@pytest.fixture
-def mock_product_repo(make_product_dto):
-    """A MagicMock spec'd against ProductRepository, pre-loaded with a DTO."""
-    from apps.products.repositories import ProductRepository
-
-    repo = MagicMock(spec=ProductRepository)
-    repo.create.return_value = make_product_dto()
-    repo.get_by_id.return_value = make_product_dto()
-    repo.list_all.return_value = [make_product_dto()]
-    return repo
 ```
 
-A few patterns worth calling out:
+Patterns worth calling out:
 
-- **Factories over fixtures for data.** `make_product_dto()` is more flexible than a `product_dto` fixture because tests can ask for `make_product_dto(stock=0)`.
-- **`spec=` on mocks**. Always pass `spec=SomeRepository` to `MagicMock` — it makes the mock fail fast on attribute typos.
-- **`override_service` lets API tests substitute a fake service** without monkey-patching imports.
+- **`make_product` (real row)** is the default for service and API tests. Hits the test DB, returns a real DTO.
+- **`make_product_dto` (no DB)** is for narrow cases — testing the path where a service receives a DTO with a missing or fabricated value before any repo call.
+- **`override_service`** wraps an *external* boundary, not an internal layer.
 
 ## Writing Each Layer
 
-### `test_repo.py` — Real database
+### `test_repo.py` — ORM ↔ DTO conversion
 
 ```python
 import pytest
@@ -186,35 +223,63 @@ def test_get_by_id_round_trips():
     fetched = repo.get_by_id(created.id)
 
     assert fetched == created
+
+
+@pytest.mark.django_db
+def test_get_by_id_raises_lookup_error_when_missing():
+    repo = ProductRepository()
+
+    with pytest.raises(LookupError):
+        repo.get_by_id(99999)
 ```
 
 - Assert on the **DTO type** at least once per repo — catches a repo accidentally returning an ORM instance.
+- Test the `LookupError` path explicitly.
 - Use `@pytest.mark.django_db(transaction=True)` only when you need to exercise `transaction.on_commit` behavior.
 
-### `test_service.py` — No database
+### `test_service.py` — Business logic, real repo, real DB
 
 ```python
+import pytest
 from decimal import Decimal
 
-import pytest
-
+from apps.products.repositories import ProductRepository
 from apps.products.services import ProductService
 
 
-def test_create_product_delegates_to_repo(mock_product_repo, make_product_dto):
-    mock_product_repo.create.return_value = make_product_dto(name="Gadget")
+@pytest.mark.django_db
+def test_create_product(make_product):
+    service = ProductService(ProductRepository())
 
-    service = ProductService(mock_product_repo)
-    result = service.create_product(name="Gadget", price=Decimal("9.99"), stock=5)
+    dto = service.create_product(name="Widget", price=Decimal("9.99"), stock=5)
 
-    assert result.name == "Gadget"
-    mock_product_repo.create.assert_called_once_with(
-        name="Gadget", price=Decimal("9.99"), stock=5
-    )
+    assert dto.name == "Widget"
+    assert dto.price == Decimal("9.99")
+
+
+@pytest.mark.django_db
+def test_create_product_rejects_negative_price():
+    service = ProductService(ProductRepository())
+
+    with pytest.raises(ValueError, match="price"):
+        service.create_product(name="Widget", price=Decimal("-1"), stock=5)
+
+
+@pytest.mark.django_db
+def test_decrement_stock_below_zero_raises(make_product):
+    product = make_product(stock=2)
+    service = ProductService(ProductRepository())
+
+    with pytest.raises(ValueError, match="Insufficient stock"):
+        service.decrement_stock(product_id=product.id, quantity=5)
 ```
 
-- **No `@pytest.mark.django_db`.** If you reach for it in a service test, you've found a leak.
-- Assert on **both** the return value and the repo calls.
+- Real repo, real DB. Pass the repo into the service constructor.
+- Use `make_*` builders to seed prerequisite data.
+- Assert on the exception **type and message fragment** for invariant violations — services raise `ValueError` / `LookupError` / `PermissionError` and the central exception handler maps them to HTTP.
+- If a service depends on multiple repos, instantiate them all and inject. The wiring is the same as production; tests just construct the service explicitly instead of going through `get(ServiceType)`.
+
+When a service calls an external dependency (payment gateway, mail provider), substitute *that* dependency with a mock — not the service itself, not its repos. Use `override_service` if the external dep is itself a service in the svcs registry.
 
 ### `test_api.py` — HTTP integration
 
@@ -258,7 +323,6 @@ Services raise plain Python exceptions; the central exception handler in `src/co
 ```python
 @pytest.mark.django_db
 def test_create_order_rejects_insufficient_stock(api_client):
-    # Create a product with only 1 in stock, then order 10
     product_resp = api_client.post(
         "/api/products/",
         data={"name": "Limited", "price": "5.00", "stock": 1},
@@ -297,7 +361,7 @@ def test_receiver_is_idempotent(mocker):
     assert send_email.call_count == 1
 ```
 
-Every receiver needs an explicit "called twice, ran once" test.
+Every receiver needs an explicit "called twice, ran once" test. The `send_email` mock here is correct — `send_order_confirmation` wraps an external mail provider, the canonical place mocks belong.
 
 ## freezegun
 
@@ -308,8 +372,9 @@ from freezegun import freeze_time
 
 
 @freeze_time("2026-01-15T12:00:00Z")
+@pytest.mark.django_db
 def test_expires_at_is_24h_from_now():
-    service = SubscriptionService(MagicMock())
+    service = SubscriptionService(SubscriptionRepository())
     dto = service.start_trial(user_id=1)
 
     assert dto.expires_at.isoformat() == "2026-01-16T12:00:00+00:00"
@@ -317,12 +382,14 @@ def test_expires_at_is_24h_from_now():
 
 ## Common Mistakes
 
-- **Reaching for `@pytest.mark.django_db` in a service test.** The service has an ORM import hiding in it.
+- **Mocking your own repository.** Use the real repo + test DB. Internal mocks pass tests that production fails.
+- **Mocking your own service from another service.** Same reason. Wire the real service via `svcs` and let it run.
 - **Using a fixture that returns a shared mutable object.** Use factories (`make_*`) instead.
 - **Asserting on `response.json() == {...}` with the full dict.** Too brittle.
 - **Forgetting `transaction=True` on reliable-signal tests.**
 - **Testing Django internals.** Don't test that `.filter()` works — test your code.
 - **Missing the idempotency test.** Every reliable-signal receiver needs one.
+- **Forgetting to mock a real external boundary.** A test that hits Stripe is not a unit test.
 
 ## Verify
 

@@ -92,7 +92,7 @@ Sets up a new (or existing) Django project into the opinionated layout. Creates 
 Adds Docker Compose for local development — `Dockerfile`, `docker-compose.yml` (web + postgres + redis + celery), `entrypoint.sh`, `Makefile`, `.dockerignore`, and `.env.example`. All dev commands run inside the `web` container via `make`. **Run after `django-scaffold`.**
 
 ### `django-architecture`
-The full feature blueprint. Given a description, the agent scaffolds models, Pydantic DTOs, repositories, services, DRF ViewSets, admin registration, and three layers of tests (repo against a real DB, service against mocked repos, API through HTTP). Composes the per-layer skills below.
+The full feature blueprint. Given a description, the agent scaffolds models, Pydantic DTOs, repositories, services, DRF ViewSets, admin registration, and three layers of tests — repo, service, and API — all backed by the real test database. Composes the per-layer skills below.
 
 ### `django-models`
 Structures Django models with a strict member layout: inline `TextChoices` first, then fields grouped as identifiers → time → status → domain → relations, then `class Meta` (verbose names, indexes, constraints), then methods. Uses Django's default `BigAutoField` for primary keys. Uniqueness lives in `Meta.constraints` (never `unique=True`), indexes in `Meta.indexes` (never `db_index=True`). Every model is registered in the admin with a clean, fast-loading config.
@@ -110,7 +110,7 @@ Reliable signals for async side-effects — notifications, cache invalidation, a
 Keeps settings organized with banner-style section headers across a base/local/production split. Use whenever settings are added, removed, or restructured.
 
 ### `django-pytest`
-Three-layer pytest setup — repo against a real DB, service against mocked repos, API through HTTP — with `pytest-django`, `pytest-celery` for reliable-signal receivers, `freezegun` for time-sensitive logic, and shared conftest fixtures.
+Three-layer pytest setup — `test_repo.py`, `test_service.py`, `test_api.py` — all running against the real test database. Mocks live at external boundaries only (HTTP clients, payment SDKs). Includes `pytest-django` config with `--reuse-db`, `pytest-celery` for reliable-signal receivers, `freezegun` for time-sensitive logic, and conftest builders that seed real rows.
 
 ### `django-lint`
 Runs `ruff check`, `ruff format --check`, and `pyrefly check`, then fixes whatever it finds. Use before committing, or any time you want a clean bill of health.
@@ -120,7 +120,7 @@ Runs `ruff check`, `ruff format --check`, and `pyrefly check`, then fixes whatev
 - **Models** — Member order: choices → fields → manager (rare) → `Meta` → methods. Fields ordered: identifiers → time → status → domain → relations. Django's `BigAutoField` for primary keys. No business logic, no custom `save()`, no computed properties.
 - **DTOs** — Pydantic v2 with `from_attributes=True`. ORM objects never leave the repository.
 - **Repositories** — The only layer that touches the ORM. Returns DTOs. `@transaction.atomic` for multi-writes. One repo per aggregate root.
-- **Services** — Receives dependencies via `__init__`. Pure business logic. Zero ORM imports. Testable without a database.
+- **Services** — Receives dependencies via `__init__`. Pure business logic. Zero ORM imports. Tested with real repositories against the test DB — mocks only at external boundaries.
 - **API** — DRF ViewSets in each app with their own router. Input validation via DRF Serializers, output reuses DTOs via `.model_dump()`. Nested resources use `drf-nested-routers`. OpenAPI via `drf-spectacular`.
 - **Reliable Signals** — Side-effects enqueued inside the DB transaction via Celery. At-least-once delivery. Idempotent receivers.
 - **Settings** — Split into base/local/production. Sectioned with banner headers. `python-decouple` for env vars.
