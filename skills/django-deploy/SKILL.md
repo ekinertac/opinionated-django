@@ -20,16 +20,16 @@ This skill covers a mid-scale production topology for the Django monolith this s
             │               │               │
             └───────────────┼───────────────┘
                             │
-              ┌─────────────┼─────────────┐
-              ▼             ▼             ▼
-        worker-01     redis-broker   redis-cache     (separate Redis instances)
-        (celery +          │             │
-         celery-beat)      │             │
-              │            │             │
-              └────────────┼─────────────┘
-                           ▼
-                  Managed PostgreSQL
-                  (with read replica when needed)
+            ┌───────────────┼───────────────┬───────────────┐
+            ▼               ▼               ▼               ▼
+      worker-beat-01     worker-02       worker-N      redis-broker
+      (celery +          (celery only)   (celery only)  redis-cache
+       celery-beat)                                     (separate)
+            │               │               │
+            └───────────────┼───────────────┘
+                            ▼
+                   Managed PostgreSQL
+                   (with read replica when needed)
 
                   S3 / CloudFront        Sentry
                   (static + media)       (errors)
@@ -41,7 +41,8 @@ Components:
 |---|---|---|
 | **Load balancer** | 1 (managed) | DigitalOcean LB, Hetzner LB, AWS ALB. Terminates TLS. Forwards to web hosts on port 8000. |
 | **web** | 2+ | gunicorn container serving Django. Behind LB. Runs the production image. |
-| **worker** | 1 | celery worker + celery-beat container. Runs the same image, different command. |
+| **worker_beat** | exactly 1 | celery worker + celery-beat. The beat scheduler must be a singleton — running it on more than one host would enqueue every periodic task multiple times. |
+| **worker** | 0+ | celery worker only (no beat). Add hosts here to scale Celery capacity horizontally. |
 | **postgres** | managed | DigitalOcean Managed Postgres, AWS RDS, etc. The skill assumes managed; self-hosted is a footnote. |
 | **redis-broker** | managed | Celery broker. Separate instance from cache. |
 | **redis-cache** | managed | Application cache. Separate instance from broker. |
@@ -175,7 +176,7 @@ services:
 Notes:
 - **No `volumes`** — the image is the source of truth. Bind mounts in production defeat the entire point of immutable deploys.
 - **No `postgres` / `redis` services** — those are managed externals. The web/celery containers connect to them over the network via `.env.production`.
-- **Web hosts run only `web`**; the worker host runs `celery` and `celery-beat`. Ansible deploys the same `compose.prod.yml` everywhere and brings up only the services each host needs (Step 9).
+- **Web hosts run only `web`**; `worker_beat` runs `celery` + `celery-beat`; `worker` hosts run only `celery`. Ansible deploys the same `compose.prod.yml` everywhere and brings up only the services each host needs (Step 9).
 - **`IMAGE_TAG`** is set by Ansible at deploy time — typically the git SHA or a release tag. Never `latest` in production.
 - **`env_file`** points at `.env.production`, which Ansible writes from Vault-decrypted values (Step 10).
 
@@ -419,13 +420,24 @@ all:
       hosts:
         web-01.example.com:
         web-02.example.com:
-    worker:
+    worker_beat:
+      # Exactly one host. celery-beat is a scheduler — running it on multiple
+      # hosts means every periodic task gets enqueued multiple times.
       hosts:
-        worker-01.example.com:
+        worker-beat-01.example.com:
+    worker:
+      # Zero or more. Add entries here to scale Celery capacity horizontally.
+      hosts:
+        worker-02.example.com:
+        worker-03.example.com:
   vars:
     ansible_user: deploy
     ansible_python_interpreter: /usr/bin/python3
 ```
+
+Scaling Celery becomes a one-line inventory change: add a host under `worker:` and run `make deploy`. The beat singleton stays put on `worker_beat`. Workers cooperate automatically via the shared broker — Redis hands each task to exactly one of them, so capacity grows linearly with hosts.
+
+Tuning concurrency (`--concurrency` per worker), splitting work across priority queues, and worker autoscaling are deferred to a future `django-celery-scale` skill — they're real concerns at scale but orthogonal to the deploy mechanism.
 
 `deploy/ansible.cfg`:
 
@@ -587,15 +599,30 @@ Edit later with `ansible-vault edit`. Rotate keys with `ansible-vault rekey`. **
       retries: 30
       delay: 2
 
-- name: Restart worker host
+- name: Restart the beat host (worker + beat — singleton)
+  hosts: worker_beat
+  become: true
+  vars:
+    image_tag: "{{ hostvars['localhost'].image_tag }}"
+  tasks:
+    - name: Restart celery worker and celery-beat
+      ansible.builtin.command:
+        cmd: docker compose -f /opt/app/compose.prod.yml up -d celery celery-beat
+        chdir: /opt/app
+      environment:
+        IMAGE_TAG: "{{ image_tag }}"
+        IMAGE_REGISTRY: "{{ image_registry }}"
+        IMAGE_NAME: "{{ image_name }}"
+
+- name: Restart additional worker hosts (worker only — beat stays a singleton)
   hosts: worker
   become: true
   vars:
     image_tag: "{{ hostvars['localhost'].image_tag }}"
   tasks:
-    - name: Restart celery worker and beat
+    - name: Restart celery worker
       ansible.builtin.command:
-        cmd: docker compose -f /opt/app/compose.prod.yml up -d celery celery-beat
+        cmd: docker compose -f /opt/app/compose.prod.yml up -d celery
         chdir: /opt/app
       environment:
         IMAGE_TAG: "{{ image_tag }}"
@@ -655,7 +682,8 @@ Rolling deploy semantics:
 
 1. Migrations run **before** any web container restarts. New code starts on a schema that's already migrated.
 2. `serial: 1` on the web play restarts one host at a time. The LB drains in-flight requests, the host pulls the new image, the new container starts, `/readyz` is polled until 200, then the next host begins.
-3. The worker host restarts last. Receivers pick up new code without losing in-flight tasks (graceful shutdown drains the queue).
+3. `worker_beat` restarts before the additional `worker` hosts so beat is briefly the only Celery process during cutover — it's a singleton anyway, so this avoids a window where two different code versions are dispatching periodic tasks.
+4. Worker hosts pick up new code without losing in-flight tasks (graceful shutdown drains the queue).
 
 This is "stop one, restart one" — not zero-downtime if a migration is non-backwards-compatible. For schema changes that the running code can't tolerate, use the expand-contract pattern (separate skill, `django-migrations-scale`).
 
@@ -689,6 +717,7 @@ Use community Ansible roles for these — `geerlingguy.docker`, `geerlingguy.sec
 - **Pinning to `:latest`.** Reproducibility goes out the window. Always deploy a specific git SHA or release tag.
 - **Forgetting `collectstatic`.** Static files 404. The deploy play handles this; if you bypass Ansible, you'll skip it.
 - **Running migrations from every web host.** Race conditions. The deploy play runs migrate exactly once, on `web[0]`, before any restart.
+- **Running `celery-beat` on more than one host.** Every periodic task gets enqueued multiple times — once per beat instance. The inventory split (`worker_beat` singleton + N `worker` hosts) exists for this reason. If you ever need beat HA, use `redbeat` (Redis-backed beat lock); otherwise keep it a singleton with monitoring.
 - **Letting Postgres or Redis ports face the internet.** They should only be reachable from your VPCs / firewall'd hosts. Managed services handle this; if you self-host, configure pg_hba.conf and Redis ACLs accordingly.
 - **`.env.production` committed to git.** Use Ansible Vault. The `.env.production` on each host is generated by Ansible and not version-controlled.
 - **Vault password file inside the repo.** It belongs in `~/.config/django-deploy/`, never tracked.
@@ -724,10 +753,11 @@ docker compose -f compose.prod.yml exec web python -c "raise Exception('sentry-t
 - [ ] `entrypoint.sh` waits for postgres but does NOT auto-migrate (no `RUN_MIGRATIONS`)
 - [ ] `gunicorn_config.py` exists with workers/threads/timeouts
 - [ ] `/healthz` and `/readyz` endpoints wired in `config/urls.py`
-- [ ] `deploy/inventory.yml` lists web and worker hosts
+- [ ] `deploy/inventory.yml` has `web`, `worker_beat`, and `worker` groups
+- [ ] **Exactly one** host in `worker_beat` (beat is a singleton — multiple hosts would multiply periodic tasks)
 - [ ] `deploy/group_vars/all/vault.yml` encrypted with Ansible Vault, password stored outside the repo
 - [ ] `deploy/group_vars/all/vars.yml` references vault values, no plaintext secrets
-- [ ] `deploy/playbooks/deploy.yml` runs migrations once, restarts web hosts serially, restarts worker last
+- [ ] `deploy/playbooks/deploy.yml` runs migrations once, restarts web hosts serially, restarts `worker_beat` then additional `worker` hosts
 - [ ] `make deploy` and `make rollback TAG=…` targets in the Makefile
 - [ ] `.gitignore` excludes the vault password file path
 - [ ] `python manage.py check --deploy` passes against `production.py`
