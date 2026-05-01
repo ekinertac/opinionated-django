@@ -89,16 +89,16 @@ Each skill is a directory under `skills/` with its own `SKILL.md`. They stand al
 Sets up a new (or existing) Django project into the opinionated layout. Creates the `src/config/` shell — split settings, services registry, exception handler, reliable signals, Celery wiring — installs dependencies with `uv`, and lays down ruff / pyrefly / pytest config. **Run this first.**
 
 ### `django-docker`
-Adds Docker Compose for local development — `Dockerfile`, `docker-compose.yml` (web + postgres + redis + celery), `.dockerignore`, and `.env.example`. All dev commands run inside the `web` container. **Run after `django-scaffold`.**
+Adds Docker Compose for local development — `Dockerfile`, `docker-compose.yml` (web + postgres + redis + celery), `entrypoint.sh`, `Makefile`, `.dockerignore`, and `.env.example`. All dev commands run inside the `web` container via `make`. **Run after `django-scaffold`.**
 
-### `django-services`
-Plain service classes with constructor-injected repositories, wired through an [svcs](https://svcs.hynek.me) registry. Business logic lives here, zero ORM imports allowed. Resolve anywhere — views, Celery tasks, management commands, tests — with a single generic `get[T]()` call.
+### `django-architecture`
+The full feature blueprint. Given a description, the agent scaffolds models, Pydantic DTOs, repositories, services, DRF ViewSets, admin registration, and three layers of tests (repo against a real DB, service against mocked repos, API through HTTP). Composes the per-layer skills below.
 
 ### `django-models`
 Structures Django models with a strict internal layout: `Meta` first (verbose names, indexes, constraints), then fields grouped as identifiers → time → status → domain → relations. Uses Django's default `BigAutoField` for primary keys. Uniqueness lives in `Meta.constraints` (never `unique=True`), indexes in `Meta.indexes` (never `db_index=True`). Every model is registered in the admin with a clean, fast-loading config.
 
-### `django-architecture`
-The full feature blueprint. Given a description, the agent scaffolds models, Pydantic DTOs, repositories, services, DRF ViewSets, admin registration, and three layers of tests (repo against a real DB, service against mocked repos, API through HTTP).
+### `django-services`
+Plain service classes with constructor-injected repositories, wired through an [svcs](https://svcs.hynek.me) registry. Business logic lives here, zero ORM imports allowed. Resolve anywhere — views, Celery tasks, management commands, tests — with a single generic `get[T]()` call.
 
 ### `django-signals`
 Reliable signals for async side-effects — notifications, cache invalidation, analytics, cross-service coordination. Receivers are enqueued **inside** the database transaction via Celery, so rollbacks are respected and delivery is at-least-once.
