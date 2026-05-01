@@ -1,59 +1,62 @@
 ---
 name: django-deploy
-description: Deploy a Django project to production at mid-scale — multi-stage production Dockerfile, production settings, gunicorn config, S3 for static and media, Sentry for errors, JSON logging, health and readiness endpoints, an Ansible playbook structure with Vault-encrypted secrets, and a rolling deploy across multiple web hosts behind a load balancer with a separate Celery worker host. Use when setting up production for the first time, adding deployment infrastructure to an existing project, or whenever the user mentions deploy, production, Ansible, gunicorn, staging, or prod.
+description: Deploy a Django project to production at mid-scale with self-hosted infrastructure — multi-stage production Dockerfile, gunicorn, health and readiness endpoints, JSON logging, an Ansible playbook structure with Vault-encrypted secrets, a rolling deploy across multiple gunicorn hosts behind a self-hosted HAProxy load balancer, separate beat-singleton + N celery worker hosts, self-hosted Postgres and Redis (broker and cache as separate instances), self-hosted GlitchTip for errors, plus pragmatic external services (S3 for static and media, AWS SES for email, Let's Encrypt for TLS). Use when setting up production for the first time, adding deployment infrastructure, or whenever the user mentions deploy, production, Ansible, gunicorn, HAProxy, staging, or prod.
 allowed-tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 
 # Production Deployment
 
-This skill covers a mid-scale production topology for the Django monolith this skill set produces — enough for tens of thousands of users on a single region, with room to grow to hundreds of thousands before architectural splits are needed. The deployment artifact is a Docker image; the deployment mechanism is Ansible.
+This skill targets a mid-scale production topology that an agent can stand up end-to-end with no GUI clicking. The infrastructure is self-hosted by Ansible; the only external services are the ones whose self-hosted alternatives have unreasonable tradeoffs (email deliverability, object storage durability) or are invisible plumbing (TLS roots).
+
+The deployment artifact is a Docker image. The deployment mechanism is Ansible.
 
 ## Topology
 
 ```
-                    Cloud Load Balancer
-                    (TLS termination)
-                            │
-            ┌───────────────┼───────────────┐
-            ▼               ▼               ▼
-        web-01          web-02          web-N         (N gunicorn hosts)
-            │               │               │
-            └───────────────┼───────────────┘
-                            │
-            ┌───────────────┼───────────────┬───────────────┐
-            ▼               ▼               ▼               ▼
-      worker-beat-01     worker-02       worker-N      redis-broker
-      (celery +          (celery only)   (celery only)  redis-cache
-       celery-beat)                                     (separate)
-            │               │               │
-            └───────────────┼───────────────┘
-                            ▼
-                   Managed PostgreSQL
-                   (with read replica when needed)
+                  HAProxy (TLS via certbot)
+                  [lb-01]
+                        │
+        ┌───────────────┼───────────────┐
+        ▼               ▼               ▼
+    web-01           web-02          web-N         (gunicorn)
+        │               │               │
+        └───────────────┼───────────────┘
+                        │
+              ┌─────────┼─────────┐
+              ▼         ▼         ▼
+        worker-beat  worker-02  worker-N           (celery)
+              │         │         │
+              └─────────┼─────────┘
+                        │
+        ┌──────────┬────┼────┬───────────┐
+        ▼          ▼    ▼    ▼           ▼
+       db-01  redis-broker  redis-cache  glitchtip-01
+       (PG)   (AOF on)      (LRU eviction)  (errors)
 
-                  S3 / CloudFront        Sentry
-                  (static + media)       (errors)
+External services:
+  S3 + CloudFront            AWS SES                Let's Encrypt
+  (static + media)           (email)                (TLS, via certbot)
 ```
 
-Components:
+| Role | Count | Self-hosted? | What it runs |
+|---|---|---|---|
+| **lb** | 1+ | ✅ HAProxy + certbot | TLS termination, forwards to web hosts |
+| **web** | 2+ | ✅ gunicorn container | Django HTTP, behind LB |
+| **worker_beat** | exactly 1 | ✅ celery + celery-beat | Beat is a singleton |
+| **worker** | 0+ | ✅ celery worker only | Add hosts here to scale |
+| **db** | 1 | ✅ Postgres container | App database, backups via pg_dump |
+| **redis_broker** | 1 | ✅ Redis container, AOF on | Celery broker — durability matters |
+| **redis_cache** | 1 | ✅ Redis container, no AOF | Application cache, LRU eviction |
+| **glitchtip** | 1 | ✅ GlitchTip docker-compose | Sentry-compatible error tracker |
+| S3 + CDN | — | external (AWS) | Static and media. CloudFront/CloudFlare for edge caching. |
+| Email | — | external (AWS SES) | Outbound transactional email. Self-hosted SMTP is a deliverability dead-end. |
+| TLS | — | external (Let's Encrypt) | Certs via certbot in Ansible — invisible plumbing. |
 
-| Role | Count | What it runs |
-|---|---|---|
-| **Load balancer** | 1 (managed) | DigitalOcean LB, Hetzner LB, AWS ALB. Terminates TLS. Forwards to web hosts on port 8000. |
-| **web** | 2+ | gunicorn container serving Django. Behind LB. Runs the production image. |
-| **worker_beat** | exactly 1 | celery worker + celery-beat. The beat scheduler must be a singleton — running it on more than one host would enqueue every periodic task multiple times. |
-| **worker** | 0+ | celery worker only (no beat). Add hosts here to scale Celery capacity horizontally. |
-| **postgres** | managed | DigitalOcean Managed Postgres, AWS RDS, etc. The skill assumes managed; self-hosted is a footnote. |
-| **redis-broker** | managed | Celery broker. Separate instance from cache. |
-| **redis-cache** | managed | Application cache. Separate instance from broker. |
-| **S3 + CDN** | managed | Static and media files. CloudFront/CloudFlare in front. |
-| **Sentry** | SaaS | Error tracking and performance monitoring. |
-
-The dev compose stack from **django-docker** is for local development only. Production runs the same image, different command, and never bind-mounts source code.
+For smaller deployments, `redis_broker` and `redis_cache` can co-locate on one host as two containers on different ports. The skill keeps them split so the inventory matches the eventual scale-out.
 
 ## Step 1: Production Dockerfile
 
-Add a production target to the existing `Dockerfile` as a second stage. The dev target stays for local; CI builds the prod target.
+Add a production target to the existing `Dockerfile` as a second stage. The dev target stays for local; `make provision` and `make deploy` build the prod target.
 
 ```dockerfile
 # syntax=docker/dockerfile:1.7
@@ -83,7 +86,6 @@ FROM ${PY_IMAGE} AS prod
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
-# Non-root user
 RUN groupadd -r app && useradd -r -g app -d /app -s /sbin/nologin app
 
 # Postgres client libs for psycopg
@@ -130,13 +132,11 @@ WORKDIR /app/src
 EXPOSE 8000
 ```
 
-The dev compose `build:` clause now points at the dev target: `target: dev`. CI builds with `--target prod` for the production image.
-
 Notes:
 - **Non-root user** in prod. Containers run as `app`, never root.
-- **`uv sync --no-dev`** in the builder strips dev dependencies (pytest, ruff, etc.) — production image is leaner.
-- **`libpq5`** is needed at runtime for psycopg's binary build to find Postgres client libraries on the slim base.
-- **No collectstatic in the build** — static files go to S3 during deploy (Step 4), not into the image.
+- **`uv sync --no-dev`** strips dev dependencies — production image is leaner.
+- **`libpq5`** is the runtime Postgres client lib for psycopg's binary build.
+- **No collectstatic in the build** — static files go to S3 during deploy (Step 4).
 - **Same entrypoint script** as dev. The wait-for-postgres logic is useful in prod too. The `RUN_MIGRATIONS` flag stays unset in production (migrations run as an explicit Ansible step).
 
 ## Step 2: `compose.prod.yml`
@@ -149,7 +149,7 @@ services:
     env_file:
       - .env.production
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"   # only the LB on the same private network reaches this
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"]
@@ -174,15 +174,83 @@ services:
 ```
 
 Notes:
-- **No `volumes`** — the image is the source of truth. Bind mounts in production defeat the entire point of immutable deploys.
-- **No `postgres` / `redis` services** — those are managed externals. The web/celery containers connect to them over the network via `.env.production`.
-- **Web hosts run only `web`**; `worker_beat` runs `celery` + `celery-beat`; `worker` hosts run only `celery`. Ansible deploys the same `compose.prod.yml` everywhere and brings up only the services each host needs (Step 9).
-- **`IMAGE_TAG`** is set by Ansible at deploy time — typically the git SHA or a release tag. Never `latest` in production.
-- **`env_file`** points at `.env.production`, which Ansible writes from Vault-decrypted values (Step 10).
+- **No `volumes`** — the image is the source of truth. Bind mounts in production defeat immutable deploys.
+- **No `postgres` / `redis` services** — those are self-hosted on dedicated hosts (Step 9). Web and celery containers connect to them over the private network via `.env.production`.
+- **Web hosts** run `web` only; **`worker_beat`** runs `celery` + `celery-beat`; **`worker`** hosts run only `celery`.
+- **Port bound to `127.0.0.1`** so only the LB (which connects over the private network) reaches gunicorn. Internet traffic terminates at HAProxy.
+- **`IMAGE_TAG`** is set by Ansible at deploy time — typically the git SHA. Never `latest`.
+- **`env_file`** points at `.env.production`, which Ansible writes from Vault-decrypted values (Step 11).
 
-## Step 3: Production settings
+## Step 3: gunicorn config
 
-`src/config/settings/production.py` builds on `base.py` with the security, logging, and storage hardening that matters in prod.
+`src/gunicorn_config.py`:
+
+```python
+import multiprocessing
+import os
+
+bind = "0.0.0.0:8000"
+workers = int(os.environ.get("GUNICORN_WORKERS", multiprocessing.cpu_count() * 2 + 1))
+worker_class = "gthread"
+threads = int(os.environ.get("GUNICORN_THREADS", 4))
+timeout = int(os.environ.get("GUNICORN_TIMEOUT", 60))
+graceful_timeout = 30
+keepalive = 5
+
+accesslog = "-"
+errorlog = "-"
+loglevel = os.environ.get("GUNICORN_LOG_LEVEL", "info")
+
+max_requests = 1000
+max_requests_jitter = 100
+
+worker_exit_on_app_exit = True
+```
+
+Tune `GUNICORN_WORKERS` per host based on CPU and memory. The default `2 * CPU + 1` is the gunicorn docs' rule of thumb for sync-ish workloads.
+
+## Step 4: Health and readiness endpoints
+
+- **`/healthz`** — liveness. Process is alive, can return a response. HAProxy uses this for the backend health check.
+- **`/readyz`** — readiness. Process can do its job (DB reachable). Used by the deploy play to gate the rolling restart.
+
+`src/config/views.py`:
+
+```python
+from django.db import connection
+from django.http import HttpResponse, JsonResponse
+
+
+def healthz(_request):
+    return HttpResponse("ok", content_type="text/plain")
+
+
+def readyz(_request):
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1")
+    except Exception as exc:
+        return JsonResponse({"status": "not ready", "error": str(exc)}, status=503)
+    return JsonResponse({"status": "ready"})
+```
+
+`src/config/urls.py`:
+
+```python
+from .views import healthz, readyz
+
+urlpatterns = [
+    # ...existing entries...
+    path("healthz", healthz, name="healthz"),
+    path("readyz", readyz, name="readyz"),
+]
+```
+
+No trailing slash so the LB doesn't get redirected by `APPEND_SLASH`.
+
+## Step 5: Production settings
+
+`src/config/settings/production.py`:
 
 ```python
 from decouple import Csv, config
@@ -195,10 +263,9 @@ from .base import *  # noqa: F401, F403
 DEBUG = False
 ALLOWED_HOSTS = config("ALLOWED_HOSTS", cast=Csv())
 
-# LB terminates TLS — trust the X-Forwarded-Proto header it sets.
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 SECURE_SSL_REDIRECT = True
-SECURE_HSTS_SECONDS = 60 * 60 * 24 * 365  # 1 year, after you've verified things work
+SECURE_HSTS_SECONDS = 60 * 60 * 24 * 365
 SECURE_HSTS_INCLUDE_SUBDOMAINS = True
 SECURE_HSTS_PRELOAD = True
 SECURE_CONTENT_TYPE_NOSNIFF = True
@@ -209,7 +276,7 @@ CSRF_COOKIE_SECURE = True
 CSRF_TRUSTED_ORIGINS = config("CSRF_TRUSTED_ORIGINS", cast=Csv())
 
 # =============================================================================
-# DATABASE
+# DATABASE — self-hosted Postgres on the `db` host
 # =============================================================================
 DATABASES = {
     "default": {
@@ -220,12 +287,11 @@ DATABASES = {
         "HOST": config("POSTGRES_HOST"),
         "PORT": config("POSTGRES_PORT", default="5432"),
         "CONN_MAX_AGE": 60,
-        "OPTIONS": {"sslmode": config("POSTGRES_SSLMODE", default="require")},
     }
 }
 
 # =============================================================================
-# CACHE (separate Redis instance from the broker)
+# CACHE — self-hosted Redis (separate instance from the broker)
 # =============================================================================
 CACHES = {
     "default": {
@@ -235,21 +301,21 @@ CACHES = {
 }
 
 # =============================================================================
-# CELERY (broker is a separate Redis instance from the cache)
+# CELERY — self-hosted Redis broker (separate instance from the cache)
 # =============================================================================
 CELERY_BROKER_URL = config("CELERY_BROKER_URL")
 CELERY_RESULT_BACKEND = config("CELERY_RESULT_BACKEND", default=None)
 
 # =============================================================================
-# STORAGES (static + media on S3)
+# STORAGES — static + media on S3 (external)
 # =============================================================================
 AWS_STORAGE_BUCKET_NAME = config("AWS_STORAGE_BUCKET_NAME")
 AWS_S3_REGION_NAME = config("AWS_S3_REGION_NAME")
-AWS_S3_CUSTOM_DOMAIN = config("AWS_S3_CUSTOM_DOMAIN", default=None)  # CloudFront domain
-AWS_QUERYSTRING_AUTH = False  # public-read static files
+AWS_S3_CUSTOM_DOMAIN = config("AWS_S3_CUSTOM_DOMAIN", default=None)
+AWS_QUERYSTRING_AUTH = False
 
 STORAGES = {
-    "default": {  # media
+    "default": {
         "BACKEND": "storages.backends.s3.S3Storage",
         "OPTIONS": {"location": "media", "default_acl": "private"},
     },
@@ -260,7 +326,18 @@ STORAGES = {
 }
 
 # =============================================================================
-# LOGGING (JSON to stdout — captured by the host log shipper)
+# EMAIL — AWS SES (external; transactional patterns live in django-email)
+# =============================================================================
+EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+EMAIL_HOST = config("EMAIL_HOST")            # e.g. email-smtp.us-east-1.amazonaws.com
+EMAIL_PORT = config("EMAIL_PORT", default=587, cast=int)
+EMAIL_HOST_USER = config("EMAIL_HOST_USER")
+EMAIL_HOST_PASSWORD = config("EMAIL_HOST_PASSWORD")
+EMAIL_USE_TLS = True
+DEFAULT_FROM_EMAIL = config("DEFAULT_FROM_EMAIL")
+
+# =============================================================================
+# LOGGING — JSON to stdout, captured by Docker
 # =============================================================================
 LOGGING = {
     "version": 1,
@@ -281,7 +358,7 @@ LOGGING = {
 }
 
 # =============================================================================
-# SENTRY
+# ERROR TRACKING — self-hosted GlitchTip (Sentry-compatible)
 # =============================================================================
 import sentry_sdk
 from sentry_sdk.integrations.celery import CeleryIntegration
@@ -289,9 +366,9 @@ from sentry_sdk.integrations.django import DjangoIntegration
 from sentry_sdk.integrations.redis import RedisIntegration
 
 sentry_sdk.init(
-    dsn=config("SENTRY_DSN"),
-    environment=config("SENTRY_ENVIRONMENT", default="production"),
-    release=config("RELEASE_VERSION", default=None),  # set at deploy time
+    dsn=config("GLITCHTIP_DSN"),                       # https://glitchtip.example.com/...
+    environment=config("DEPLOY_ENVIRONMENT", default="production"),
+    release=config("RELEASE_VERSION", default=None),   # set at deploy time
     integrations=[
         DjangoIntegration(),
         CeleryIntegration(),
@@ -302,113 +379,254 @@ sentry_sdk.init(
 )
 ```
 
-Add `django-storages[s3]`, `sentry-sdk[django]`, and `python-json-logger` to dependencies:
+Add the production-only dependencies:
 
 ```bash
 docker compose exec web uv add 'django-storages[s3]>=1.14' 'sentry-sdk[django]>=2.0' python-json-logger
 ```
 
-## Step 4: Static and media on S3
+The `sentry-sdk` package works against GlitchTip unchanged because GlitchTip implements the Sentry ingest API.
 
-`STORAGES` config is in Step 3. Two operational details:
+## Step 6: Static and media on S3 (external)
 
-- **`collectstatic` runs at deploy time, not build time.** Build-time collection would require AWS credentials in the build pipeline and re-run on every image build even when static files haven't changed. The Ansible deploy play (Step 11) runs `python manage.py collectstatic --noinput` on one host as a one-shot — it uploads only changed files thanks to `S3Storage`'s checksum check.
-- **CDN** — put CloudFront (or CloudFlare) in front of the bucket. Set `AWS_S3_CUSTOM_DOMAIN=cdn.example.com`. URLs in templates will resolve via the CDN.
+`STORAGES` config is in Step 5. Two operational details:
 
-## Step 5: Health and readiness endpoints
+- **`collectstatic` runs at deploy time, not build time.** Build-time would require AWS credentials in the build pipeline and re-run on every image build. The deploy play (Step 13) runs `python manage.py collectstatic --noinput` on one host as a one-shot — it uploads only changed files thanks to `S3Storage`'s checksum check.
+- **CDN** — put CloudFront (or CloudFlare) in front of the bucket. Set `AWS_S3_CUSTOM_DOMAIN=cdn.example.com`. URLs in templates resolve via the CDN.
 
-Production orchestrators need three flavors of probe; for this topology we expose two:
+Bucket creation, IAM users, and policies are out of scope for this skill — they're a one-time AWS-side task. The `vault.yml` only stores the resulting access keys.
 
-- **`/healthz`** — liveness. Process is alive, can return a response.
-- **`/readyz`** — readiness. Process can do its job (DB reachable). LB and Compose healthcheck both poll this.
+## Step 7: Email via AWS SES (external)
 
-Add to `src/config/views.py`:
+Settings from Step 5 already configure SMTP against SES. Two more concerns:
 
-```python
-from django.db import connection
-from django.http import HttpResponse, JsonResponse
+- **Domain verification + DKIM/SPF** is a one-time DNS step on the SES side, AWS-side. Deliverability suffers without it.
+- **Transactional email patterns** (templates, sending via Celery, bounce handling) live in the `django-email` skill — not here. The deploy skill only configures the connection.
 
+## Step 8: Self-hosted infrastructure (Ansible-managed)
 
-def healthz(_request):
-    return HttpResponse("ok", content_type="text/plain")
+This is the section that flips with managed services. Each component runs in Docker on a dedicated host and is configured by Ansible roles in `deploy/roles/`.
 
+### 8a. HAProxy + Let's Encrypt — the `lb` host
 
-def readyz(_request):
-    try:
-        with connection.cursor() as cursor:
-            cursor.execute("SELECT 1")
-    except Exception as exc:
-        return JsonResponse({"status": "not ready", "error": str(exc)}, status=503)
-    return JsonResponse({"status": "ready"})
+HAProxy terminates TLS and forwards to the web hosts. Certificates come from Let's Encrypt via certbot, automatically renewed.
+
+`deploy/roles/haproxy/templates/haproxy.cfg.j2` (key parts):
+
+```
+global
+    log stdout format raw local0
+    maxconn 4096
+
+defaults
+    log     global
+    mode    http
+    option  httplog
+    option  forwardfor
+    timeout connect 5s
+    timeout client  60s
+    timeout server  60s
+
+frontend http_front
+    bind *:80
+    http-request redirect scheme https code 301 unless { ssl_fc }
+
+frontend https_front
+    bind *:443 ssl crt /etc/letsencrypt/live/{{ lb_domain }}/haproxy.pem alpn h2,http/1.1
+    http-request set-header X-Forwarded-Proto https
+    default_backend django_web
+
+backend django_web
+    option httpchk GET /healthz
+    http-check expect status 200
+    balance roundrobin
+{% for host in groups['web'] %}
+    server {{ host }} {{ hostvars[host].ansible_host | default(host) }}:8000 check
+{% endfor %}
 ```
 
-Wire in `src/config/urls.py`:
+Renewal hook concatenates the cert+key into HAProxy's combined PEM format:
 
-```python
-from .views import healthz, readyz
-
-urlpatterns = [
-    # ...existing entries...
-    path("healthz", healthz, name="healthz"),
-    path("readyz", readyz, name="readyz"),
-]
+```
+# /etc/letsencrypt/renewal-hooks/deploy/haproxy.sh
+cat /etc/letsencrypt/live/{{ lb_domain }}/fullchain.pem \
+    /etc/letsencrypt/live/{{ lb_domain }}/privkey.pem \
+    > /etc/letsencrypt/live/{{ lb_domain }}/haproxy.pem
+chmod 600 /etc/letsencrypt/live/{{ lb_domain }}/haproxy.pem
+docker exec haproxy kill -USR2 1   # graceful reload
 ```
 
-`/healthz` and `/readyz` use no trailing slash so the LB doesn't get redirected by `APPEND_SLASH`.
+The role:
+1. Installs Docker (use `geerlingguy.docker`)
+2. Issues the cert via `certbot certonly --standalone` on first run
+3. Sets up the systemd timer for auto-renewal
+4. Renders `haproxy.cfg` from the inventory's `web` group
+5. Runs the haproxy container with `--network host`
 
-## Step 6: gunicorn config
+For LB high-availability, run a second `lb` host with `keepalived` for a floating IP. Out of scope for v1.
 
-`src/gunicorn_config.py`:
+### 8b. Postgres — the `db` host
 
-```python
-import multiprocessing
-import os
+A single Postgres container with a named volume for data and a backup cron. `geerlingguy.postgresql` handles the bare-metal install if you prefer; the Docker route below is consistent with the rest of the stack.
 
-bind = "0.0.0.0:8000"
-workers = int(os.environ.get("GUNICORN_WORKERS", multiprocessing.cpu_count() * 2 + 1))
-worker_class = "gthread"
-threads = int(os.environ.get("GUNICORN_THREADS", 4))
-timeout = int(os.environ.get("GUNICORN_TIMEOUT", 60))
-graceful_timeout = 30
-keepalive = 5
+`deploy/roles/postgres/templates/compose.postgres.yml.j2`:
 
-accesslog = "-"  # stdout, captured by Docker, formatted by JSON logger via app
-errorlog = "-"
-loglevel = os.environ.get("GUNICORN_LOG_LEVEL", "info")
-
-# Restart workers periodically to recycle memory
-max_requests = 1000
-max_requests_jitter = 100
-
-# Drain in-flight requests on SIGTERM (rolling restart safety)
-worker_exit_on_app_exit = True
+```yaml
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    volumes:
+      - /srv/postgres/data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: "{{ postgres_db }}"
+      POSTGRES_USER: "{{ postgres_user }}"
+      POSTGRES_PASSWORD: "{{ postgres_password }}"
+    ports:
+      - "{{ private_ip }}:5432:5432"   # bind to private interface only
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U {{ postgres_user }}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    shm_size: 256m
 ```
 
-Tune `GUNICORN_WORKERS` per host based on CPU count and memory pressure. The default `2 * CPU + 1` is the gunicorn docs' rule of thumb for sync-ish workloads; for async-heavy code, use `uvicorn`-class workers instead.
+The role:
+1. Installs Docker on `db-01`
+2. Renders the compose file with the private-network IP
+3. Creates `/srv/postgres/data` with the right permissions
+4. Brings up the container with `docker compose up -d`
+5. Installs the backup script (Step 14)
+6. Configures the firewall to allow Postgres traffic only from the `web` and `worker*` host IPs
 
-## Step 7: Ansible deployment structure
+This is a single-host Postgres — a planned single point of failure for the v1 topology. Streaming replication via `repmgr` or a managed standby is a follow-on (`django-postgres-ha`, future skill).
+
+### 8c. Redis — the `redis_broker` and `redis_cache` hosts
+
+Two Redis instances with different durability profiles. Same role, different vars.
+
+`deploy/roles/redis/templates/compose.redis.yml.j2`:
+
+```yaml
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: >
+      redis-server
+      {{ '--appendonly yes' if redis_persist else '--appendonly no' }}
+      {{ '--maxmemory ' + redis_maxmemory if redis_maxmemory else '' }}
+      {{ '--maxmemory-policy ' + redis_maxmemory_policy if redis_maxmemory_policy else '' }}
+      --requirepass {{ redis_password }}
+    volumes:
+      - /srv/redis/data:/data
+    ports:
+      - "{{ private_ip }}:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "{{ redis_password }}", "ping"]
+      interval: 10s
+```
+
+`deploy/group_vars/redis_broker.yml`:
+
+```yaml
+redis_persist: true             # AOF on — in-flight tasks survive a crash
+redis_maxmemory: ""             # let it grow
+redis_maxmemory_policy: ""
+```
+
+`deploy/group_vars/redis_cache.yml`:
+
+```yaml
+redis_persist: false            # cache is rebuildable; disk writes are wasted I/O
+redis_maxmemory: "1gb"
+redis_maxmemory_policy: "allkeys-lru"
+```
+
+Both share a Vault-encrypted `redis_password`. The Django side connects via `rediss://:{password}@redis-broker.internal:6379/0` (TLS) or `redis://...` if the private network is trusted.
+
+### 8d. GlitchTip — the `glitchtip` host
+
+GlitchTip publishes an official docker-compose. The role drops it on the host and brings it up with vault-supplied secrets.
+
+`deploy/roles/glitchtip/templates/compose.glitchtip.yml.j2` (boilerplate based on their docs — keep the upstream as the source of truth):
+
+```yaml
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_HOST_AUTH_METHOD: "trust"   # private network only
+    volumes:
+      - /srv/glitchtip/postgres:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+
+  web:
+    image: glitchtip/glitchtip:latest
+    depends_on: [postgres, redis]
+    ports:
+      - "{{ private_ip }}:8000:8000"
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/postgres
+      SECRET_KEY: "{{ glitchtip_secret_key }}"
+      EMAIL_URL: "{{ glitchtip_email_url }}"
+      GLITCHTIP_DOMAIN: "https://glitchtip.{{ root_domain }}"
+      DEFAULT_FROM_EMAIL: "{{ default_from_email }}"
+      CELERY_WORKER_AUTOSCALE: "1,3"
+
+  worker:
+    image: glitchtip/glitchtip:latest
+    command: celery -A glitchtip worker
+    depends_on: [postgres, redis]
+    environment:  # same as web
+
+  migrate:
+    image: glitchtip/glitchtip:latest
+    command: ./bin/run-migrate.sh
+    depends_on: [postgres]
+    environment: # same as web
+    restart: "no"
+```
+
+HAProxy fronts the glitchtip host on `glitchtip.<domain>` with its own cert. The Django side sets `GLITCHTIP_DSN=https://<key>@glitchtip.<domain>/<project_id>` — sentry-sdk talks to it as if it were Sentry.
+
+GlitchTip's upstream docs are the source of truth for the compose file — pin a version, don't track `:latest` in production.
+
+## Step 9: Ansible structure
 
 The deploy lives in a `deploy/` directory at the repo root.
 
 ```
 deploy/
-  inventory.yml
   ansible.cfg
+  inventory.yml
   group_vars/
     all/
-      vars.yml          # plain config (image registry, repo URL)
+      vars.yml          # plain config (image registry, internal hostnames, etc.)
       vault.yml         # encrypted secrets (Vault)
+    redis_broker.yml
+    redis_cache.yml
   playbooks/
-    deploy.yml          # the rolling deploy
-    rollback.yml        # rollback to a prior image tag
+    provision.yml       # one-time + on infra changes — sets up infra hosts
+    deploy.yml          # per-release — updates app hosts
+    rollback.yml        # rolls back to a prior image tag
   roles/
-    docker_login/       # log into the image registry on a host
-    pull_image/
+    docker/             # install Docker (or use geerlingguy.docker)
+    haproxy/
+    postgres/
+    redis/              # parameterized — used for both broker and cache
+    glitchtip/
     write_env/          # render .env.production from group_vars + vault
-    migrate/            # one-shot db migration
-    collectstatic/      # one-shot static upload to S3
-    restart_web/        # rolling restart of web compose service
-    restart_worker/     # restart worker compose services
+    pull_image/
+    migrate/
+    collectstatic/
+    restart_web/
+    restart_worker/
+  templates/
+    env.production.j2
 ```
 
 `deploy/inventory.yml`:
@@ -416,28 +634,38 @@ deploy/
 ```yaml
 all:
   children:
+    lb:
+      hosts:
+        lb-01.internal:
     web:
       hosts:
-        web-01.example.com:
-        web-02.example.com:
+        web-01.internal:
+        web-02.internal:
     worker_beat:
-      # Exactly one host. celery-beat is a scheduler — running it on multiple
-      # hosts means every periodic task gets enqueued multiple times.
       hosts:
-        worker-beat-01.example.com:
+        worker-beat-01.internal:
     worker:
-      # Zero or more. Add entries here to scale Celery capacity horizontally.
       hosts:
-        worker-02.example.com:
-        worker-03.example.com:
+        worker-02.internal:
+        worker-03.internal:
+    db:
+      hosts:
+        db-01.internal:
+    redis_broker:
+      hosts:
+        redis-broker-01.internal:
+    redis_cache:
+      hosts:
+        redis-cache-01.internal:
+    glitchtip:
+      hosts:
+        glitchtip-01.internal:
   vars:
     ansible_user: deploy
     ansible_python_interpreter: /usr/bin/python3
 ```
 
-Scaling Celery becomes a one-line inventory change: add a host under `worker:` and run `make deploy`. The beat singleton stays put on `worker_beat`. Workers cooperate automatically via the shared broker — Redis hands each task to exactly one of them, so capacity grows linearly with hosts.
-
-Tuning concurrency (`--concurrency` per worker), splitting work across priority queues, and worker autoscaling are deferred to a future `django-celery-scale` skill — they're real concerns at scale but orthogonal to the deploy mechanism.
+Scaling Celery is a one-line inventory change: add a host under `worker:`, run `make deploy`. Scaling web is the same with one extra step — add to `web:` and re-render the HAProxy config (`make provision --tags=haproxy`).
 
 `deploy/ansible.cfg`:
 
@@ -454,17 +682,12 @@ roles_path = ./roles
 pipelining = True
 ```
 
-The play structure stays small and focused. Heavyweight provisioning (installing Docker, configuring the firewall, swap, fail2ban) is **not** in this skill — point at community roles like `geerlingguy.docker`, `geerlingguy.security`, and `geerlingguy.swap`.
-
-## Step 8: Ansible Vault for secrets
-
-Production secrets — `SECRET_KEY`, `POSTGRES_PASSWORD`, `SENTRY_DSN`, `AWS_*`, `CELERY_BROKER_URL` (with credentials), etc. — live in `deploy/group_vars/all/vault.yml`, encrypted with Ansible Vault.
-
-Setup:
+## Step 10: Ansible Vault for secrets
 
 ```bash
 # Generate a vault password and store it OUTSIDE the repo
-echo "$(openssl rand -base64 32)" > ~/.config/django-deploy/vault_pass
+mkdir -p ~/.config/django-deploy
+openssl rand -base64 32 > ~/.config/django-deploy/vault_pass
 chmod 400 ~/.config/django-deploy/vault_pass
 
 # Create the vault file
@@ -476,55 +699,120 @@ ansible-vault create deploy/group_vars/all/vault.yml \
 
 ```yaml
 vault_secret_key: "django-secret-key-here"
-vault_postgres_password: "postgres-password-here"
-vault_sentry_dsn: "https://abc@sentry.io/123"
+vault_postgres_password: "..."
+vault_redis_password: "..."
+vault_glitchtip_secret_key: "..."
+vault_glitchtip_dsn: "https://abc@glitchtip.example.com/1"
 vault_aws_access_key_id: "AKIA..."
 vault_aws_secret_access_key: "..."
-vault_redis_broker_url: "rediss://:pass@broker.host:6379/0"
-vault_redis_cache_url: "rediss://:pass@cache.host:6379/0"
+vault_email_host_user: "AKIA-SES..."
+vault_email_host_password: "..."
+vault_registry_user: "..."
+vault_registry_password: "..."
 ```
 
-`deploy/group_vars/all/vars.yml` (committed, plain):
+`deploy/group_vars/all/vars.yml` (committed, plain — references vault values):
 
 ```yaml
 image_registry: "registry.example.com"
 image_name: "myapp"
-postgres_host: "db.example.com"
-postgres_db: "app"
-postgres_user: "app"
+root_domain: "example.com"
+lb_domain: "app.example.com"
 allowed_hosts: "app.example.com,api.example.com"
 csrf_trusted_origins: "https://app.example.com"
+
+postgres_db: "app"
+postgres_user: "app"
+postgres_host: "db-01.internal"
+postgres_password: "{{ vault_postgres_password }}"
+
+redis_password: "{{ vault_redis_password }}"
+celery_broker_url: "redis://:{{ vault_redis_password }}@redis-broker-01.internal:6379/0"
+redis_cache_url: "redis://:{{ vault_redis_password }}@redis-cache-01.internal:6379/0"
+
 aws_storage_bucket_name: "myapp-static-prod"
 aws_s3_region_name: "us-east-1"
 aws_s3_custom_domain: "cdn.example.com"
-sentry_environment: "production"
-
-secret_key: "{{ vault_secret_key }}"
-postgres_password: "{{ vault_postgres_password }}"
-sentry_dsn: "{{ vault_sentry_dsn }}"
 aws_access_key_id: "{{ vault_aws_access_key_id }}"
 aws_secret_access_key: "{{ vault_aws_secret_access_key }}"
-celery_broker_url: "{{ vault_redis_broker_url }}"
-redis_cache_url: "{{ vault_redis_cache_url }}"
+
+email_host: "email-smtp.us-east-1.amazonaws.com"
+email_host_user: "{{ vault_email_host_user }}"
+email_host_password: "{{ vault_email_host_password }}"
+default_from_email: "noreply@example.com"
+
+glitchtip_dsn: "{{ vault_glitchtip_dsn }}"
+glitchtip_secret_key: "{{ vault_glitchtip_secret_key }}"
+
+secret_key: "{{ vault_secret_key }}"
 ```
 
 Edit later with `ansible-vault edit`. Rotate keys with `ansible-vault rekey`. **Never** commit the vault password file — `.gitignore` it explicitly.
 
-## Step 9: The deploy playbook
+## Step 11: Provisioning playbook
 
-`deploy/playbooks/deploy.yml`:
+Provisioning is the one-time bootstrap (and the path for adding/replacing infrastructure hosts). It runs the role for each infra host group.
+
+`deploy/playbooks/provision.yml`:
+
+```yaml
+- name: Install Docker on every host
+  hosts: all
+  become: true
+  roles:
+    - docker
+
+- name: Configure HAProxy + Let's Encrypt
+  hosts: lb
+  become: true
+  roles:
+    - haproxy
+
+- name: Configure Postgres
+  hosts: db
+  become: true
+  roles:
+    - postgres
+
+- name: Configure Redis (broker)
+  hosts: redis_broker
+  become: true
+  roles:
+    - role: redis
+      vars:
+        redis_persist: true
+
+- name: Configure Redis (cache)
+  hosts: redis_cache
+  become: true
+  roles:
+    - role: redis
+      vars:
+        redis_persist: false
+        redis_maxmemory: "1gb"
+        redis_maxmemory_policy: "allkeys-lru"
+
+- name: Configure GlitchTip
+  hosts: glitchtip
+  become: true
+  roles:
+    - glitchtip
+```
+
+Run with `make provision`. Idempotent — subsequent runs only change what's drifted or new.
+
+## Step 12: Deploy playbook
 
 ```yaml
 - name: Resolve image tag
   hosts: localhost
   gather_facts: false
   tasks:
-    - name: Use IMAGE_TAG from environment, fall back to git SHA
-      ansible.builtin.set_fact:
+    - ansible.builtin.set_fact:
         image_tag: "{{ lookup('env', 'IMAGE_TAG') | default(lookup('pipe', 'git rev-parse --short HEAD'), true) }}"
 
-- name: Push the env file to every host
-  hosts: all
+- name: Push the env file to every app host
+  hosts: web:worker_beat:worker
   become: true
   tasks:
     - name: Render .env.production from vars + vault
@@ -554,13 +842,13 @@ Edit later with `ansible-vault edit`. Rotate keys with `ansible-vault rekey`. **
         name: "{{ image_registry }}/{{ image_name }}:{{ hostvars['localhost'].image_tag }}"
         source: pull
 
-- name: Run migrations on one host (any web host will do)
+- name: Run migrations on one host (any web host)
   hosts: web[0]
   become: true
   vars:
     image_tag: "{{ hostvars['localhost'].image_tag }}"
   tasks:
-    - name: Run migrate
+    - name: migrate
       ansible.builtin.command:
         cmd: >
           docker compose -f /opt/app/compose.prod.yml run --rm
@@ -568,7 +856,7 @@ Edit later with `ansible-vault edit`. Rotate keys with `ansible-vault rekey`. **
           web python manage.py migrate --noinput
         chdir: /opt/app
 
-    - name: Run collectstatic
+    - name: collectstatic
       ansible.builtin.command:
         cmd: >
           docker compose -f /opt/app/compose.prod.yml run --rm
@@ -578,12 +866,12 @@ Edit later with `ansible-vault edit`. Rotate keys with `ansible-vault rekey`. **
 
 - name: Rolling restart of web hosts
   hosts: web
-  serial: 1                       # one host at a time
+  serial: 1
   become: true
   vars:
     image_tag: "{{ hostvars['localhost'].image_tag }}"
   tasks:
-    - name: Restart web service with new image
+    - name: Restart web
       ansible.builtin.command:
         cmd: docker compose -f /opt/app/compose.prod.yml up -d web
         chdir: /opt/app
@@ -592,7 +880,7 @@ Edit later with `ansible-vault edit`. Rotate keys with `ansible-vault rekey`. **
         IMAGE_REGISTRY: "{{ image_registry }}"
         IMAGE_NAME: "{{ image_name }}"
 
-    - name: Wait for /readyz to return 200
+    - name: Wait for /readyz
       ansible.builtin.uri:
         url: "http://{{ inventory_hostname }}:8000/readyz"
         status_code: 200
@@ -605,8 +893,7 @@ Edit later with `ansible-vault edit`. Rotate keys with `ansible-vault rekey`. **
   vars:
     image_tag: "{{ hostvars['localhost'].image_tag }}"
   tasks:
-    - name: Restart celery worker and celery-beat
-      ansible.builtin.command:
+    - ansible.builtin.command:
         cmd: docker compose -f /opt/app/compose.prod.yml up -d celery celery-beat
         chdir: /opt/app
       environment:
@@ -614,14 +901,13 @@ Edit later with `ansible-vault edit`. Rotate keys with `ansible-vault rekey`. **
         IMAGE_REGISTRY: "{{ image_registry }}"
         IMAGE_NAME: "{{ image_name }}"
 
-- name: Restart additional worker hosts (worker only — beat stays a singleton)
+- name: Restart additional worker hosts (worker only)
   hosts: worker
   become: true
   vars:
     image_tag: "{{ hostvars['localhost'].image_tag }}"
   tasks:
-    - name: Restart celery worker
-      ansible.builtin.command:
+    - ansible.builtin.command:
         cmd: docker compose -f /opt/app/compose.prod.yml up -d celery
         chdir: /opt/app
       environment:
@@ -638,13 +924,13 @@ SECRET_KEY={{ secret_key }}
 ALLOWED_HOSTS={{ allowed_hosts }}
 CSRF_TRUSTED_ORIGINS={{ csrf_trusted_origins }}
 RELEASE_VERSION={{ hostvars['localhost'].image_tag }}
+DEPLOY_ENVIRONMENT=production
 
 POSTGRES_DB={{ postgres_db }}
 POSTGRES_USER={{ postgres_user }}
 POSTGRES_PASSWORD={{ postgres_password }}
 POSTGRES_HOST={{ postgres_host }}
 POSTGRES_PORT=5432
-POSTGRES_SSLMODE=require
 
 CELERY_BROKER_URL={{ celery_broker_url }}
 REDIS_CACHE_URL={{ redis_cache_url }}
@@ -655,16 +941,64 @@ AWS_S3_CUSTOM_DOMAIN={{ aws_s3_custom_domain }}
 AWS_ACCESS_KEY_ID={{ aws_access_key_id }}
 AWS_SECRET_ACCESS_KEY={{ aws_secret_access_key }}
 
-SENTRY_DSN={{ sentry_dsn }}
-SENTRY_ENVIRONMENT={{ sentry_environment }}
+EMAIL_HOST={{ email_host }}
+EMAIL_PORT=587
+EMAIL_HOST_USER={{ email_host_user }}
+EMAIL_HOST_PASSWORD={{ email_host_password }}
+DEFAULT_FROM_EMAIL={{ default_from_email }}
+
+GLITCHTIP_DSN={{ glitchtip_dsn }}
 ```
 
-## Step 10: `make deploy`
+Rolling deploy semantics:
 
-In the project Makefile:
+1. Migrations run **before** any web container restarts. New code starts on a schema that's already migrated.
+2. `serial: 1` on the web play restarts one host at a time. The LB drains in-flight requests, the host pulls the new image, the new container starts, `/readyz` is polled until 200, then the next host begins.
+3. `worker_beat` restarts before the additional `worker` hosts so beat is briefly the only Celery process during cutover.
+4. Worker hosts pick up new code without losing in-flight tasks (graceful shutdown drains the queue).
+
+For non-backwards-compatible migrations, use the expand-contract pattern (separate skill, `django-migrations-scale`).
+
+## Step 13: Backups
+
+A backup that's never restored isn't a backup. The Postgres role installs:
+
+1. **`pg_dump` cron** — daily compressed dump to `/srv/postgres/backups/`.
+2. **`rclone` push** to off-host storage (S3, B2, etc.) — uses the same AWS credentials as the app.
+3. **Retention policy** — keep daily for 14 days, weekly for 8 weeks.
+4. **Periodic restore drill** — a documented runbook (not in this skill body) that pulls a backup, restores it to a staging host, and runs `python manage.py check` against it. Aim quarterly.
+
+`deploy/roles/postgres/templates/backup.sh.j2`:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+DATE=$(date +%F)
+DUMP=/srv/postgres/backups/${DATE}.sql.gz
+
+docker exec postgres pg_dump -U {{ postgres_user }} -d {{ postgres_db }} \
+  | gzip -9 > "${DUMP}"
+
+# Push to off-host storage
+rclone copy "${DUMP}" "s3:{{ backup_bucket }}/postgres/" --quiet
+
+# Local retention: 14 days
+find /srv/postgres/backups/ -type f -mtime +14 -delete
+```
+
+Cron: `0 3 * * *` (daily, 3 AM in the host's timezone).
+
+Restore is the inverse: `pg_restore` from a dump pulled via `rclone`. Document and rehearse it.
+
+## Step 14: Makefile
 
 ```makefile
-.PHONY: deploy rollback
+.PHONY: provision deploy rollback
+
+provision: ## Bootstrap or update infrastructure hosts (idempotent)
+	cd deploy && ansible-playbook playbooks/provision.yml \
+		--vault-password-file ~/.config/django-deploy/vault_pass
 
 deploy: ## Deploy the current commit to production
 	cd deploy && ansible-playbook playbooks/deploy.yml \
@@ -676,51 +1010,24 @@ rollback: ## Roll back to a prior image tag — pass TAG=<sha>
 		--vault-password-file ~/.config/django-deploy/vault_pass
 ```
 
-Run from the repo root: `make deploy`. The image tag defaults to the current `git rev-parse --short HEAD`, so deploying after a `git push` cycles the production image to whatever's checked out.
-
-Rolling deploy semantics:
-
-1. Migrations run **before** any web container restarts. New code starts on a schema that's already migrated.
-2. `serial: 1` on the web play restarts one host at a time. The LB drains in-flight requests, the host pulls the new image, the new container starts, `/readyz` is polled until 200, then the next host begins.
-3. `worker_beat` restarts before the additional `worker` hosts so beat is briefly the only Celery process during cutover — it's a singleton anyway, so this avoids a window where two different code versions are dispatching periodic tasks.
-4. Worker hosts pick up new code without losing in-flight tasks (graceful shutdown drains the queue).
-
-This is "stop one, restart one" — not zero-downtime if a migration is non-backwards-compatible. For schema changes that the running code can't tolerate, use the expand-contract pattern (separate skill, `django-migrations-scale`).
-
-## Step 11: Rollback
-
-Image tags are pinned per deploy. To roll back:
-
-```bash
-make rollback TAG=abc1234
-```
-
-The play re-runs against the named tag. Migrations are NOT auto-reverted — that's a manual decision. If the bad deploy included a migration that's incompatible with the previous code, hand-write a reverse migration first.
-
-## Provisioning (out of scope)
-
-The skill assumes the hosts already have:
-- Docker Engine + Compose plugin
-- A `deploy` user with SSH key auth and Docker group membership
-- Firewall rules: 22 (SSH from your IP), 8000 (only from LB)
-- Time sync (chrony / systemd-timesyncd)
-- Swap configured
-- Log shipper to send Docker logs somewhere persistent
-
-Use community Ansible roles for these — `geerlingguy.docker`, `geerlingguy.security`, `geerlingguy.swap`, etc. Don't reinvent these inside this skill.
+Run from the repo root.
 
 ## Common Mistakes
 
-- **Running `runserver` in production.** Use gunicorn. `runserver` is single-threaded, prints stack traces with debug info, and is explicitly not for production.
-- **Bind-mounting source code in `compose.prod.yml`.** Defeats the immutable-image guarantee. Production runs whatever's baked into the image; dev runs whatever's in your editor.
-- **Missing `SECURE_PROXY_SSL_HEADER`.** Django thinks every request is HTTP and `request.is_secure()` returns False. Cookies marked secure get rejected. Forms break.
-- **Pinning to `:latest`.** Reproducibility goes out the window. Always deploy a specific git SHA or release tag.
-- **Forgetting `collectstatic`.** Static files 404. The deploy play handles this; if you bypass Ansible, you'll skip it.
-- **Running migrations from every web host.** Race conditions. The deploy play runs migrate exactly once, on `web[0]`, before any restart.
-- **Running `celery-beat` on more than one host.** Every periodic task gets enqueued multiple times — once per beat instance. The inventory split (`worker_beat` singleton + N `worker` hosts) exists for this reason. If you ever need beat HA, use `redbeat` (Redis-backed beat lock); otherwise keep it a singleton with monitoring.
-- **Letting Postgres or Redis ports face the internet.** They should only be reachable from your VPCs / firewall'd hosts. Managed services handle this; if you self-host, configure pg_hba.conf and Redis ACLs accordingly.
-- **`.env.production` committed to git.** Use Ansible Vault. The `.env.production` on each host is generated by Ansible and not version-controlled.
+- **Running `runserver` in production.** Use gunicorn. `runserver` is single-threaded, prints debug stack traces, and is explicitly not for production.
+- **Bind-mounting source code in `compose.prod.yml`.** Defeats the immutable-image guarantee.
+- **Missing `SECURE_PROXY_SSL_HEADER`.** Django thinks every request is HTTP, secure cookies fail, redirects loop.
+- **Pinning to `:latest`.** Reproducibility goes out the window. Always deploy a specific git SHA.
+- **Forgetting `collectstatic`.** Static files 404. The deploy play handles it.
+- **Running migrations from every web host.** Race conditions. The play runs migrate exactly once on `web[0]`.
+- **Running `celery-beat` on more than one host.** Every periodic task gets enqueued multiple times. The `worker_beat` / `worker` split exists for this reason.
+- **Letting Postgres or Redis face the internet.** They listen on the host's private IP only and the firewall blocks the public interface.
+- **`.env.production` committed to git.** Use Ansible Vault. The on-host file is generated by Ansible, never tracked.
 - **Vault password file inside the repo.** It belongs in `~/.config/django-deploy/`, never tracked.
+- **Backups never restored.** A backup is theoretical until you've done a restore drill. Schedule one quarterly minimum.
+- **`POSTGRES_HOST_AUTH_METHOD: trust` on the app database.** That's only safe in GlitchTip's *internal* compose where the DB isn't exposed. The app's Postgres needs `scram-sha-256` and a strong `POSTGRES_PASSWORD`.
+- **Using `:latest` on GlitchTip.** Pin a version. The upstream project ships breaking changes.
+- **Skipping the SES domain verification step.** Email lands in spam folders or doesn't deliver at all.
 
 ## Verify
 
@@ -728,40 +1035,65 @@ Use community Ansible roles for these — `geerlingguy.docker`, `geerlingguy.sec
 # Build the prod image locally
 docker build --target prod -t myapp:test .
 
-# Smoke-test it (requires a Postgres + Redis somewhere)
+# Smoke-test it
 docker run --rm --env-file .env.staging myapp:test python manage.py check --deploy
 
-# Ansible-side: dry run on a staging inventory
+# Ansible dry runs
+cd deploy && ansible-playbook playbooks/provision.yml --check \
+  --vault-password-file ~/.config/django-deploy/vault_pass
+
 cd deploy && ansible-playbook playbooks/deploy.yml --check \
   --vault-password-file ~/.config/django-deploy/vault_pass
 
-# After a real deploy: hit the endpoints
+# After a real deploy
 curl -sf https://app.example.com/healthz
 curl -sf https://app.example.com/readyz
 
-# Trigger a test error to verify Sentry receives it
-docker compose -f compose.prod.yml exec web python -c "raise Exception('sentry-test')"
+# Trigger a test error and confirm GlitchTip received it
+docker compose -f compose.prod.yml exec web python -c "raise Exception('glitchtip-test')"
+
+# Verify a backup
+ls -la /srv/postgres/backups/   # on db-01
+rclone ls s3:{{ backup_bucket }}/postgres/
+
+# Restore drill (on a staging host)
+gunzip -c /srv/postgres/backups/$(date +%F).sql.gz | docker exec -i postgres-staging psql -U app -d app
 ```
 
-`python manage.py check --deploy` is Django's built-in audit for production settings (it flags missing `SECURE_*` settings, weak `SECRET_KEY`, etc.). Run it in CI too.
+`python manage.py check --deploy` is Django's built-in audit for production settings — flags missing `SECURE_*`, weak `SECRET_KEY`, etc. Run it in CI too.
 
 ## Checklist
 
+### Image and settings
 - [ ] `Dockerfile` has `prod` and `dev` targets; CI builds `--target prod`
 - [ ] `compose.prod.yml` defines web / celery / celery-beat with the prod image and `restart: unless-stopped`
-- [ ] `production.py` has `DEBUG=False`, `SECURE_*` settings, `STORAGES` for S3, `LOGGING` for JSON, Sentry init, separate `CACHES` and `CELERY_BROKER_URL`
+- [ ] `production.py` has `DEBUG=False`, `SECURE_*` settings, `STORAGES` for S3, `LOGGING` for JSON, GlitchTip init via sentry-sdk, separate `CACHES` and `CELERY_BROKER_URL`, SES email config
 - [ ] `entrypoint.sh` waits for postgres but does NOT auto-migrate (no `RUN_MIGRATIONS`)
 - [ ] `gunicorn_config.py` exists with workers/threads/timeouts
 - [ ] `/healthz` and `/readyz` endpoints wired in `config/urls.py`
-- [ ] `deploy/inventory.yml` has `web`, `worker_beat`, and `worker` groups
-- [ ] **Exactly one** host in `worker_beat` (beat is a singleton — multiple hosts would multiply periodic tasks)
-- [ ] `deploy/group_vars/all/vault.yml` encrypted with Ansible Vault, password stored outside the repo
+
+### Inventory and infrastructure
+- [ ] `deploy/inventory.yml` has groups: `lb`, `web`, `worker_beat`, `worker`, `db`, `redis_broker`, `redis_cache`, `glitchtip`
+- [ ] **Exactly one** host in `worker_beat`
+- [ ] HAProxy installed and configured on `lb`, with Let's Encrypt cert and auto-renew hook
+- [ ] Postgres running on `db`, listening on the private IP only, firewall blocks public
+- [ ] Two Redis instances: broker (AOF on), cache (LRU eviction, no AOF)
+- [ ] GlitchTip running on `glitchtip`, fronted by HAProxy on its own subdomain
+- [ ] All host-to-host traffic over the private network
+
+### Secrets and config
+- [ ] `deploy/group_vars/all/vault.yml` encrypted with Ansible Vault
+- [ ] Vault password file at `~/.config/django-deploy/vault_pass`, NOT in the repo
 - [ ] `deploy/group_vars/all/vars.yml` references vault values, no plaintext secrets
-- [ ] `deploy/playbooks/deploy.yml` runs migrations once, restarts web hosts serially, restarts `worker_beat` then additional `worker` hosts
-- [ ] `make deploy` and `make rollback TAG=…` targets in the Makefile
-- [ ] `.gitignore` excludes the vault password file path
-- [ ] `python manage.py check --deploy` passes against `production.py`
-- [ ] LB health check points at `/readyz`
-- [ ] Postgres/Redis network ports are not exposed to the internet
-- [ ] Sentry receives a test error from the deployed environment
+- [ ] `.env.production` is generated by Ansible on each app host, NOT committed
+
+### Deploy and operations
+- [ ] `deploy/playbooks/provision.yml` configures every infra host group
+- [ ] `deploy/playbooks/deploy.yml` runs migrations once, restarts web hosts serially with `/readyz` gating, restarts `worker_beat` then additional `worker` hosts
+- [ ] `make provision`, `make deploy`, `make rollback TAG=…` all in the project Makefile
+- [ ] `python manage.py check --deploy` passes
 - [ ] First deploy logged + verified before automating subsequent deploys
+- [ ] Test error appears in GlitchTip
+- [ ] Postgres backup cron running and pushing to off-host storage
+- [ ] Restore drill documented and scheduled (quarterly minimum)
+- [ ] AWS SES domain verified (DKIM/SPF DNS records in place); test email delivers to inbox, not spam

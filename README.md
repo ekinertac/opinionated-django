@@ -116,7 +116,7 @@ Three-layer pytest setup — `test_repo.py`, `test_service.py`, `test_api.py` �
 Runs `ruff check`, `ruff format --check`, and `pyrefly check`, then fixes whatever it finds. Use before committing, or any time you want a clean bill of health.
 
 ### `django-deploy`
-Mid-scale production deployment — multi-stage Dockerfile, gunicorn, S3 for static and media, Sentry, JSON logging, `/healthz` and `/readyz` endpoints, and an Ansible playbook with Vault-encrypted secrets that does a rolling deploy across multiple web hosts behind a cloud load balancer with a separate Celery worker host. Provisioning is out of scope — point at community roles for Docker, firewall, swap.
+Mid-scale production deployment, self-hosted by Ansible — multi-stage Dockerfile, gunicorn, `/healthz` and `/readyz` endpoints, JSON logging, an Ansible playbook with Vault-encrypted secrets that does a rolling deploy across N web hosts behind a self-hosted HAProxy load balancer (TLS via Let's Encrypt), separate beat-singleton + N celery worker hosts, self-hosted Postgres with backups, two self-hosted Redis instances (broker and cache), and self-hosted GlitchTip for errors. The pragmatic external dependencies are S3 (static and media), AWS SES (email — deliverability is its own game), and Let's Encrypt (TLS). Everything else is configured from code so an agent can stand it up end-to-end.
 
 ## The Patterns at a Glance
 
