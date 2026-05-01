@@ -112,6 +112,7 @@ RULES:
 - Contains all business logic: validation, orchestration, cross-repo coordination
 - Touches ZERO ORM — no `.objects`, no `F()`, no `Q()`, no model imports
 - Returns DTOs
+- **CRUD service convention:** if the service backs a resource ViewSet (`ServiceMixin` from **django-api**), expose `list_items`, `get_item`, `create_item`, `update_item`, `delete_item`. Generic names — the class already names the resource (`ProductService.list_items()`, not `list_products`). Domain-specific operations (`archive_product`, `restock_product`) keep their full names.
 
 ### Layer 5: Register in svcs
 
@@ -137,11 +138,13 @@ Files: `src/apps/<app>/serializers.py`, `src/apps/<app>/views.py`, `src/apps/<ap
 Follow the **django-api** skill for full conventions, examples, and the checklist. The irreducible rules:
 
 - Use `serializers.Serializer` for input validation. **NEVER `ModelSerializer`.**
-- Use `viewsets.ViewSet` (bare). **NEVER `ModelViewSet` / `GenericViewSet` with a `queryset`** — those couple the view to the ORM and bypass the repo + service stack.
-- Each action method: validate via the Serializer, dispatch to a service via `get(SomeService)`, return `dto.model_dump()`. No business logic, no ORM imports, no try/except.
-- Output is `dto.model_dump()` — never a Serializer instance.
-- Pass `user_id=request.user.id` to services that need it. Services stay HTTP-unaware.
+- Resource ViewSets inherit `ServiceMixin` from `config.api` (configure `service_class`, `create_serializer`, `update_serializer`). The default CRUD actions come for free; backing service must expose `list_items` / `get_item` / `create_item` / `update_item` / `delete_item`.
+- **NEVER `ModelViewSet` / `GenericViewSet` with a `queryset`** — those couple the view to the ORM and bypass the repo + service stack.
+- Override the action method (not config knobs) to customize. Most common: passing `user_id=request.user.id` on writes.
+- Output is `dto.model_dump()` — never a Serializer instance. The `dto_response` helper in `config.api` handles single + list cases.
+- No try/except in views. Service exceptions propagate to `config/exception_handler.py`.
 - Permissions are two-tier: DRF `permission_classes` for request-level (auth, role); services raise `PermissionError` for data-level ("does this user own this row?").
+- Custom domain actions (`archive`, `publish`, `restock`) stay as explicit `@action` methods on the viewset — never bolted into `ServiceMixin`.
 - Apps register their own router in `urls.py`; `config/urls.py` mounts them under `api/v1/`. Use `drf-nested-routers` for nested resources.
 - Annotate actions with `@extend_schema(responses={...: DTO.drf_serializer})` so OpenAPI docs reflect the actual output shape.
 

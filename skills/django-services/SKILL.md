@@ -81,24 +81,55 @@ class ProductService:
     def __init__(self, repo: ProductRepository):
         self.repo = repo
 
-    def create_product(self, name: str, price: Decimal, stock: int) -> ProductDTO:
+    def list_items(self) -> List[ProductDTO]:
+        return self.repo.list_all()
+
+    def get_item(self, pk: int) -> ProductDTO:
+        return self.repo.get_by_id(pk)
+
+    def create_item(self, name: str, price: Decimal, stock: int) -> ProductDTO:
         return self.repo.create(name=name, price=price, stock=stock)
 
-    def get_product(self, product_id: int) -> ProductDTO:
-        return self.repo.get_by_id(product_id)
+    def update_item(self, pk: int, **fields) -> ProductDTO:
+        return self.repo.update(pk, **fields)
 
-    def list_products(self) -> List[ProductDTO]:
-        return self.repo.list_all()
+    def delete_item(self, pk: int) -> None:
+        self.repo.delete(pk)
+
+    # Domain-specific actions keep their full names — see "Naming" below
+    def archive_product(self, pk: int, *, user_id: int) -> ProductDTO:
+        product = self.repo.get_by_id(pk)
+        if product.owner_id != user_id:
+            raise PermissionError(f"User {user_id} cannot archive product {pk}")
+        return self.repo.set_archived(pk)
 ```
 
 Rules:
 
 - **Dependencies come in through `__init__`.** The service never instantiates its own repositories or services.
 - **Zero ORM.** No `.objects`, no `F()` / `Q()`, no model imports, no `select_related`.
-- **Every public method returns a DTO or `list[DTO]`.**
+- **Every public method returns a DTO or `list[DTO]`** (or `None` for delete).
 - **Business rules live here.** Validation, orchestration across repositories, invariant checks, error raising.
 - **Services are stateless.** They hold references to their dependencies and nothing else.
-- **Raise plain exceptions.** Use `ValueError`, `PermissionError`, domain-specific exceptions — not `Http404` or anything Django-flavored.
+- **Raise plain exceptions.** Use `ValueError`, `PermissionError`, `LookupError`, domain-specific exceptions — not `Http404` or anything Django-flavored.
+
+### CRUD service convention
+
+Services that back a resource ViewSet (`ServiceMixin` from **django-api**) MUST expose these five method names:
+
+| Method | Purpose | Returns |
+|---|---|---|
+| `list_items()` | List all (or filter via kwargs like `user_id=...`) | `list[DTO]` |
+| `get_item(pk: int)` | Fetch one by primary key | `DTO` (raises `LookupError` if missing) |
+| `create_item(**fields)` | Create from validated input | `DTO` |
+| `update_item(pk: int, **fields)` | Update from validated input | `DTO` |
+| `delete_item(pk: int)` | Delete by primary key | `None` |
+
+Generic names — not `list_products`, `create_order`, etc. The service's class name (`ProductService`, `OrderService`) already carries the resource. `ProductService.list_products()` reads as redundant.
+
+Resource-specific names are reserved for **non-CRUD operations** — `archive_product`, `restock_product`, `recalculate_total`, etc. Those keep their full names because the operation is what's distinctive, not the resource.
+
+Services that don't fit the CRUD shape (notification senders, payment processors, search) skip the convention entirely. Their viewsets use a vanilla `viewsets.ViewSet` (no `ServiceMixin`) and call into the service via `get(SomeService)` directly.
 
 ### Cross-Entity Logic
 
@@ -110,7 +141,7 @@ class OrderService:
         self.repo = repo
         self.product_repo = product_repo
 
-    def create_order(self, items: List[Dict[str, Any]]) -> OrderDTO:
+    def create_item(self, items: List[Dict[str, Any]]) -> OrderDTO:
         for item in items:
             product = self.product_repo.get_by_id(item["product_id"])
             if product.stock < item["quantity"]:
@@ -137,23 +168,41 @@ Notes:
 
 ### From a DRF ViewSet
 
+For resource ViewSets, `ServiceMixin` resolves the service automatically — see **django-api**:
+
+```python
+from rest_framework import viewsets
+
+from config.api import ServiceMixin
+
+from .serializers import CreateProductSerializer, UpdateProductSerializer
+from .services import ProductService
+
+
+class ProductViewSet(ServiceMixin, viewsets.ViewSet):
+    service_class = ProductService
+    create_serializer = CreateProductSerializer
+    update_serializer = UpdateProductSerializer
+```
+
+For services that don't fit the CRUD shape, resolve via `get()` directly:
+
 ```python
 from rest_framework import status, viewsets
 from rest_framework.response import Response
 
+from config.api import dto_response, validate
 from config.services import get
 
-from .serializers import CreateProductSerializer
-from .services import ProductService
+from .serializers import SendNotificationSerializer
+from .services import NotificationService
 
 
-class ProductViewSet(viewsets.ViewSet):
+class NotificationViewSet(viewsets.ViewSet):
     def create(self, request):
-        serializer = CreateProductSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        service = get(ProductService)
-        dto = service.create_product(**serializer.validated_data)
-        return Response(dto.model_dump(), status=status.HTTP_201_CREATED)
+        data = validate(SendNotificationSerializer, request.data)
+        result = get(NotificationService).send(**data)
+        return dto_response(result, status.HTTP_202_ACCEPTED)
 ```
 
 Auth is enforced via DRF's `permission_classes` on the ViewSet or globally in `REST_FRAMEWORK` settings.
@@ -185,7 +234,7 @@ from apps.products.services import ProductService
 class Command(BaseCommand):
     def handle(self, *args, **options):
         service = get(ProductService)
-        for dto in service.list_products():
+        for dto in service.list_items():
             self.stdout.write(dto.name)
 ```
 
@@ -205,10 +254,10 @@ from apps.products.services import ProductService
 
 
 @pytest.mark.django_db
-def test_create_product():
+def test_create_item():
     service = ProductService(ProductRepository())
 
-    dto = service.create_product(name="Widget", price=Decimal("9.99"), stock=5)
+    dto = service.create_item(name="Widget", price=Decimal("9.99"), stock=5)
 
     assert dto.name == "Widget"
 
@@ -219,7 +268,7 @@ def test_create_order_rejects_insufficient_stock(make_product):
     service = OrderService(OrderRepository(), ProductRepository())
 
     with pytest.raises(ValueError, match="Insufficient stock"):
-        service.create_order(items=[{"product_id": product.id, "quantity": 5}])
+        service.create_item(items=[{"product_id": product.id, "quantity": 5}])
 ```
 
 - Pass repositories into the service constructor explicitly. The wiring matches production; the test just constructs locally instead of going through `get(ServiceType)`.

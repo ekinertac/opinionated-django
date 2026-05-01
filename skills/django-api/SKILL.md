@@ -82,73 +82,117 @@ class CreateOrderSerializer(serializers.Serializer):
 
 If you find yourself reaching for `Serializer.save()`, `ModelSerializer`, or anything that touches the ORM from the serializer, stop. The serializer is doing too much. Move the work to a service method.
 
-## Step 2: ViewSets — thin dispatchers
+## Step 2: ViewSets — `ServiceMixin` + overrides
 
 File: `src/apps/<app>/views.py`
 
-Use **`viewsets.ViewSet`** — the bare base class. NOT `ModelViewSet`, NOT `GenericViewSet` with `queryset = ...`. Both of those couple the view to the ORM directly and bypass the repository / service stack.
+Resource viewsets inherit `ServiceMixin` from `config/api.py` (defined in **django-scaffold**), which provides default implementations of all six standard actions. Configure via three class attributes:
 
 ```python
-from rest_framework import status, viewsets
-from rest_framework.decorators import action
-from rest_framework.response import Response
+from rest_framework import viewsets
 
-from config.services import get
-from config.types import AuthedRequest
+from config.api import ServiceMixin
 
 from .serializers import CreateProductSerializer, UpdateProductSerializer
 from .services import ProductService
 
 
-class ProductViewSet(viewsets.ViewSet):
-    def list(self, request):
-        dtos = get(ProductService).list_products()
-        return Response([d.model_dump() for d in dtos])
+class ProductViewSet(ServiceMixin, viewsets.ViewSet):
+    service_class = ProductService
+    create_serializer = CreateProductSerializer
+    update_serializer = UpdateProductSerializer
+```
 
-    def retrieve(self, request, pk=None):
-        dto = get(ProductService).get_product(int(pk))
-        return Response(dto.model_dump())
+That's the entire viewset for a basic CRUD resource. The mixin's defaults handle `list`, `retrieve`, `create`, `update`, `partial_update`, `destroy`. The backing service must expose the CRUD method names: `list_items`, `get_item`, `create_item`, `update_item`, `delete_item` (see **django-services**).
 
-    def create(self, request):
-        serializer = CreateProductSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        dto = get(ProductService).create_product(**serializer.validated_data)
-        return Response(dto.model_dump(), status=status.HTTP_201_CREATED)
+**Never `ModelViewSet`. Never `GenericViewSet` with a `queryset`.** Both couple the view to the ORM and bypass the repository / service stack. `viewsets.ViewSet` (bare) plus `ServiceMixin` is the only resource-viewset shape.
 
-    def update(self, request, pk=None):
-        serializer = UpdateProductSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        dto = get(ProductService).update_product(int(pk), **serializer.validated_data)
-        return Response(dto.model_dump())
+### Customizing: override the action method
 
-    def partial_update(self, request, pk=None):
-        return self.update(request, pk)
+The mixin's defaults are explicitly designed to be replaced one method at a time. When a resource needs custom behavior, override just that action — no `super().create()` indirection unless you want it.
 
-    def destroy(self, request, pk=None):
-        get(ProductService).delete_product(int(pk))
-        return Response(status=status.HTTP_204_NO_CONTENT)
+**Most common override: passing `user_id` to a service:**
+
+```python
+from config.types import AuthedRequest
+
+
+class ProductViewSet(ServiceMixin, viewsets.ViewSet):
+    service_class = ProductService
+    create_serializer = CreateProductSerializer
+    update_serializer = UpdateProductSerializer
+
+    def create(self, request: AuthedRequest):
+        data = validate(self.create_serializer, request.data)
+        return dto_response(
+            self.service.create_item(user_id=request.user.id, **data),
+            status.HTTP_201_CREATED,
+        )
+```
+
+**Custom destroy with a side effect:**
+
+```python
+def destroy(self, request, pk=None):
+    self.service.delete_item(int(pk))
+    return Response(
+        {"detail": f"Product {pk} deleted."},
+        status=status.HTTP_204_NO_CONTENT,
+    )
+```
+
+**Filter on `list`:**
+
+```python
+def list(self, request: AuthedRequest):
+    return dto_response(self.service.list_items(user_id=request.user.id))
+```
+
+The override pattern preserves the mixin's discipline: each action is still 1-2 lines of meaningful code, and the deviation is right next to the rest of the resource's API surface where readers expect it.
+
+### Custom (non-CRUD) actions
+
+`@action` methods stay explicit — no benefit from being in the mixin. They use the same helpers (`validate`, `dto_response`, `self.service`):
+
+```python
+from rest_framework.decorators import action
+
+
+class ProductViewSet(ServiceMixin, viewsets.ViewSet):
+    service_class = ProductService
+    create_serializer = CreateProductSerializer
+    update_serializer = UpdateProductSerializer
 
     @action(detail=True, methods=["post"])
     def archive(self, request: AuthedRequest, pk=None):
-        dto = get(ProductService).archive_product(int(pk), user_id=request.user.id)
-        return Response(dto.model_dump())
+        return dto_response(
+            self.service.archive_product(int(pk), user_id=request.user.id)
+        )
 ```
 
-Rules:
+Notice: `archive_product` (resource-specific) on the service, not `archive_item`. The CRUD naming convention applies only to the five standard methods; domain-specific operations keep their full names.
 
-- **Action methods only.** Each one: validate, dispatch to a service, return a DTO via `model_dump()`. If a method is more than ~6 lines, the logic belongs in the service.
-- **No try/except.** Service exceptions propagate to `config/exception_handler.py` which maps them to HTTP. The view is HTTP-aware only insofar as it sets status codes.
-- **Status codes:**
-  - `200` for `list` / `retrieve` / `update` / `partial_update`
-  - `201` for `create`
-  - `204` for `destroy` (no body)
+### When NOT to use `ServiceMixin`
+
+Don't use the mixin for:
+
+- **Services that don't follow CRUD** — notification services, payment processors, search endpoints, anything where "list / retrieve / create / update / destroy" doesn't fit. Use a vanilla `viewsets.ViewSet` and call into the service via `get(SomeService)`, with `validate` / `dto_response` helpers as needed.
+- **ViewSets that are entirely custom actions** — pure `@action`-driven endpoints. The mixin's defaults are never invoked, so adding the mixin is misleading.
+
+The rule of thumb: if at least three of the five CRUD actions apply, use the mixin. Otherwise inherit `viewsets.ViewSet` directly.
+
+### Action-method rules (apply whether you use the mixin or override)
+
+- **No try/except.** Service exceptions propagate to `config/exception_handler.py` which maps them to HTTP. The view sets status codes, not handles errors.
+- **Status codes:** `200` for read / update, `201` for create, `204` for destroy (no body), `200` for `@action` returning data.
 - **`pk` is a string** (URL path component). Coerce to `int` at the boundary before calling the service.
-- **`@action(detail=True/False, methods=[...])`** for endpoints that don't fit CRUD. URL becomes `/products/{pk}/archive/` (`detail=True`) or `/products/archive/` (`detail=False`).
-- **Pass `user_id=request.user.id`** explicitly when the service needs it. The service does NOT receive `request` — it stays HTTP-unaware. Use the `AuthedRequest` type alias from `config.types` so `request.user` is narrowed past `AnonymousUser`.
+- **Pass `user_id=request.user.id`** explicitly when the service needs it. Services stay HTTP-unaware. Use the `AuthedRequest` type alias from `config.types` so `request.user` is narrowed past `AnonymousUser`.
 
-### `partial_update` shorthand
+### Why ServiceMixin and not more
 
-If `update` and `partial_update` go through the same Update serializer (which has `required=False` on every field), the simple `return self.update(...)` delegation is fine. If you need stricter `update` semantics (require all fields), give them separate serializers.
+`ServiceMixin` is the *only* mixin in `config/api.py`. There's no `SerializerMixin`, no `PermissionMixin`, no `ResponseMixin`. The next mixin proposal is the moment to ask: "am I about to reinvent `ModelViewSet`?". The `validate` and `dto_response` helpers cover those cases without inheritance.
+
+Same goes for config knobs *on* `ServiceMixin`. If your viewset needs `pass_user_id=True`, you don't need the knob — you need to override `create` (it's three lines). If it needs an action-keyed serializer dict, you don't need that either — you have `self.create_serializer` and `self.update_serializer` already, and a fourth shape (`PatchProductSerializer`?) means the standard `update` behavior probably doesn't fit. Override.
 
 ## Step 3: URL routing
 
@@ -487,13 +531,16 @@ The OpenAPI validation catches schema issues before they reach API consumers —
 - [ ] Distinct Create and Update serializers (no big-bag-of-optional-fields pattern)
 - [ ] Field-level validation in `validate_<field>`, cross-field in `validate`
 - [ ] No DB queries inside serializer `validate` methods
-- [ ] ViewSet inherits from `viewsets.ViewSet` (bare), NOT `ModelViewSet` / `GenericViewSet`
+- [ ] Resource ViewSets inherit from `ServiceMixin` + `viewsets.ViewSet`, NOT `ModelViewSet` / `GenericViewSet`
+- [ ] `service_class`, `create_serializer`, `update_serializer` set on the viewset class body
+- [ ] Backing service exposes `list_items`, `get_item`, `create_item`, `update_item`, `delete_item`
+- [ ] Action customizations are method overrides on the viewset, NOT new mixins or config knobs on `ServiceMixin`
 - [ ] No try/except in views — exceptions propagate to `config/exception_handler.py`
 - [ ] No model imports in `views.py`
-- [ ] Each action method validates input, dispatches via `get(SomeService)`, returns `dto.model_dump()`
 - [ ] `pk` coerced to `int` before passing to the service
 - [ ] `user_id=request.user.id` passed explicitly when the service needs the caller's identity
 - [ ] Status codes: 201 create, 200 read/update, 204 destroy
+- [ ] Custom domain actions use `@action`, never bolted into `ServiceMixin`
 - [ ] Authentication classes configured globally in `REST_FRAMEWORK`; project-specific class is documented somewhere
 - [ ] Request-level permissions in DRF `permission_classes` / `get_permissions()`; data-level checks raise `PermissionError` from the service
 - [ ] DTO inherits from `drf_pydantic.BaseModel` so `@extend_schema(responses={...: DTO.drf_serializer})` works

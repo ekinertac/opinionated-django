@@ -39,6 +39,7 @@ src/
     services.py          # svcs registry + get() helper
     types.py             # AuthedRequest and other shared typing aliases
     models.py            # Abstract BaseModel (created_at, updated_at)
+    api.py               # ServiceMixin + validate/dto_response helpers
     signals.py           # ReliableSignal base + send_reliable machinery
     exception_handler.py # Central DRF exception handler
     settings/
@@ -205,6 +206,77 @@ orders_router.register(r"items", OrderItemViewSet, basename="order-items")
 
 urlpatterns = router.urls + orders_router.urls
 ```
+
+## Step 6.5: `src/config/api.py` — ServiceMixin and helpers
+
+The API layer leans on a single thin mixin plus two helpers so resource ViewSets stay tiny. See **django-api** for the full conventions and override patterns.
+
+```python
+from typing import Any, TypeVar
+
+from pydantic import BaseModel
+from rest_framework import status as http_status
+from rest_framework.response import Response
+from rest_framework.serializers import Serializer
+
+
+def validate(serializer_class: type[Serializer], data: Any) -> dict[str, Any]:
+    """Validate incoming data against a Serializer; return validated_data or raise."""
+    serializer = serializer_class(data=data)
+    serializer.is_valid(raise_exception=True)
+    return serializer.validated_data
+
+
+def dto_response(dto: BaseModel | list[BaseModel], status: int = http_status.HTTP_200_OK) -> Response:
+    """Wrap a DTO (or list of DTOs) in a DRF Response via .model_dump()."""
+    if isinstance(dto, list):
+        return Response([d.model_dump() for d in dto], status=status)
+    return Response(dto.model_dump(), status=status)
+
+
+class ServiceMixin:
+    """Resolve the viewset's service via svcs and provide default CRUD actions.
+
+    Configure on the viewset:
+        service_class = SomeService
+        create_serializer = SomeCreateSerializer    # required for create
+        update_serializer = SomeUpdateSerializer    # required for update / partial_update
+
+    The backing service must expose `list_items`, `get_item`, `create_item`,
+    `update_item`, `delete_item`. Override any action to customize.
+    """
+    service_class: type
+    create_serializer: type[Serializer] | None = None
+    update_serializer: type[Serializer] | None = None
+
+    @property
+    def service(self):
+        from config.services import get
+        return get(self.service_class)
+
+    def list(self, request):
+        return dto_response(self.service.list_items())
+
+    def retrieve(self, request, pk=None):
+        return dto_response(self.service.get_item(int(pk)))
+
+    def create(self, request):
+        data = validate(self.create_serializer, request.data)
+        return dto_response(self.service.create_item(**data), http_status.HTTP_201_CREATED)
+
+    def update(self, request, pk=None):
+        data = validate(self.update_serializer, request.data)
+        return dto_response(self.service.update_item(int(pk), **data))
+
+    def partial_update(self, request, pk=None):
+        return self.update(request, pk)
+
+    def destroy(self, request, pk=None):
+        self.service.delete_item(int(pk))
+        return Response(status=http_status.HTTP_204_NO_CONTENT)
+```
+
+Resist adding more mixins. If you reach for one, the answer is almost always "use a helper instead, or override the method."
 
 ## Step 7: `src/config/models.py` — Base Model
 
@@ -445,6 +517,7 @@ All four must pass. Fix any issue rather than silencing it.
 - [ ] `src/config/services.py` with `registry` and `get()`
 - [ ] `src/config/types.py` with `AuthedRequest`
 - [ ] `src/config/exception_handler.py` with central DRF exception handler
+- [ ] `src/config/api.py` with `ServiceMixin`, `validate`, `dto_response`
 - [ ] `src/config/models.py` with `BaseModel` (abstract, timestamps only)
 - [ ] `src/config/signals.py` with `ReliableSignal` base
 - [ ] `src/config/celery.py` + `__init__.py` export
