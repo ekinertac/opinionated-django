@@ -76,7 +76,7 @@ Skills install with a single command:
 npx skills add ekinertac/opinionated-django
 
 # Or just one
-npx skills add ekinertac/opinionated-django/django-scaffold|django-docker|django-architecture|django-models|django-services|django-signals|django-settings|django-pytest|django-lint
+npx skills add ekinertac/opinionated-django/django-scaffold|django-docker|django-architecture|django-models|django-repositories|django-services|django-signals|django-settings|django-pytest|django-lint
 ```
 
 Your agent will pick them up automatically on its next run. You can also clone the repo and point your agent at `skills/` directly.
@@ -96,6 +96,9 @@ The full feature blueprint. Given a description, the agent scaffolds models, Pyd
 
 ### `django-models`
 Structures Django models with a strict member layout: inline `TextChoices` first, then fields grouped as identifiers → time → status → domain → relations, then `class Meta` (verbose names, indexes, constraints), then methods. Uses Django's default `BigAutoField` for primary keys. Uniqueness lives in `Meta.constraints` (never `unique=True`), indexes in `Meta.indexes` (never `db_index=True`). Every model is registered in the admin with a clean, fast-loading config.
+
+### `django-repositories`
+The boundary where ORM objects die and DTOs are born. One class per aggregate root, primitives in, `DTO` / `list[DTO]` / `Page[DTO]` out — never querysets. Covers the `model_validate` conversion primitive, `select_related` / `prefetch_related` for nested DTOs, the `coerce_related_manager` validator pattern, transactions, bulk operations, naming (`get_by_*` raises, `list_*` doesn't), and what *not* to put here (business logic, permissions, signals).
 
 ### `django-services`
 Plain service classes with constructor-injected repositories, wired through an [svcs](https://svcs.hynek.me) registry. Business logic lives here, zero ORM imports allowed. Resolve anywhere — views, Celery tasks, management commands, tests — with a single generic `get[T]()` call.

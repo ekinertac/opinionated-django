@@ -86,27 +86,22 @@ File: `src/apps/<app>/dtos.py`
 
 RULES:
 - `model_config = ConfigDict(from_attributes=True)` — always
-- For Django `RelatedManager` fields (reverse FKs, M2M), add the coercion validator:
-
-```python
-@field_validator("children", mode="before")
-@classmethod
-def coerce_related_manager(cls, v):
-    if hasattr(v, "all"):
-        return list(v.all())
-    return v
-```
+- For Django `RelatedManager` fields (reverse FKs, M2M), add the `coerce_related_manager` `mode="before"` validator. See **django-repositories** → "Reverse Relations" for the full pattern (the validator is tightly coupled to repo prefetching, so both halves are documented there together).
 
 ### Layer 3: Repository
 
 File: `src/apps/<app>/repositories.py`
 
-RULES:
-- ORM objects NEVER leave this layer — every public method returns a DTO or `list[DTO]`
+Follow the **django-repositories** skill for full conventions, examples, and the checklist. The key rules:
+
+- ORM objects NEVER leave this layer — every public method returns a `DTO` / `list[DTO]` / `Page[DTO]`
 - Convert with `MyEntityDTO.model_validate(orm_obj)`
-- `prefetch_related()` when the DTO has nested relations
+- Inputs are primitives (IDs, strings, dates) — never model instances
+- `select_related` / `prefetch_related` when the DTO has nested relations
 - `@transaction.atomic` on any method with multiple writes
 - One repo per aggregate root — child entities are managed by the parent's repo
+- `LookupError` on missing rows
+- No business logic, no permission checks, no signal sending
 
 ### Layer 4: Service
 
