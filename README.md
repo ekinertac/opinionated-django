@@ -95,7 +95,7 @@ Adds Docker Compose for local development — `Dockerfile`, `docker-compose.yml`
 The full feature blueprint. Given a description, the agent scaffolds models, Pydantic DTOs, repositories, services, DRF ViewSets, admin registration, and three layers of tests (repo against a real DB, service against mocked repos, API through HTTP). Composes the per-layer skills below.
 
 ### `django-models`
-Structures Django models with a strict internal layout: `Meta` first (verbose names, indexes, constraints), then fields grouped as identifiers → time → status → domain → relations. Uses Django's default `BigAutoField` for primary keys. Uniqueness lives in `Meta.constraints` (never `unique=True`), indexes in `Meta.indexes` (never `db_index=True`). Every model is registered in the admin with a clean, fast-loading config.
+Structures Django models with a strict member layout: inline `TextChoices` first, then fields grouped as identifiers → time → status → domain → relations, then `class Meta` (verbose names, indexes, constraints), then methods. Uses Django's default `BigAutoField` for primary keys. Uniqueness lives in `Meta.constraints` (never `unique=True`), indexes in `Meta.indexes` (never `db_index=True`). Every model is registered in the admin with a clean, fast-loading config.
 
 ### `django-services`
 Plain service classes with constructor-injected repositories, wired through an [svcs](https://svcs.hynek.me) registry. Business logic lives here, zero ORM imports allowed. Resolve anywhere — views, Celery tasks, management commands, tests — with a single generic `get[T]()` call.
@@ -114,7 +114,7 @@ Runs `ruff check`, `ruff format --check`, and `pyrefly check`, then fixes whatev
 
 ## The Patterns at a Glance
 
-- **Models** — `Meta` first (verbose names, indexes, constraints). Fields ordered: identifiers → time → status → domain → relations. Django's `BigAutoField` for primary keys. No business logic, no custom `save()`, no computed properties.
+- **Models** — Member order: choices → fields → manager (rare) → `Meta` → methods. Fields ordered: identifiers → time → status → domain → relations. Django's `BigAutoField` for primary keys. No business logic, no custom `save()`, no computed properties.
 - **DTOs** — Pydantic v2 with `from_attributes=True`. ORM objects never leave the repository.
 - **Repositories** — The only layer that touches the ORM. Returns DTOs. `@transaction.atomic` for multi-writes. One repo per aggregate root.
 - **Services** — Receives dependencies via `__init__`. Pure business logic. Zero ORM imports. Testable without a database.

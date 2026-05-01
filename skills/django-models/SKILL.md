@@ -27,7 +27,34 @@ from django.db import models
 
 
 class MyEntity(models.Model):
-    # 1. Meta — ALWAYS first, before any field
+    # 1. Choices — inner enum classes, declared inline so they live next to their fields
+    class Status(models.TextChoices):
+        DRAFT = "draft", "Draft"
+        PUBLISHED = "published", "Published"
+
+    # 2. Fields, in this sub-order: identifiers → time → status → domain → relations
+
+    # Identifiers — slugs, external refs (PK is handled by Django's BigAutoField)
+    slug = models.SlugField(max_length=255)
+
+    # Time fields — created, updated, any dates/datetimes
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    # Workflow / status / state (if applicable) — uses the inline Status above
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT)
+
+    # Everything else — domain fields
+    name = models.CharField(max_length=255)
+    description = models.TextField(blank=True)
+
+    # Relations — ForeignKey, OneToOne, ManyToMany (always last among fields)
+    category = models.ForeignKey("categories.Category", on_delete=models.CASCADE)
+
+    # 3. Manager — only if a custom manager is unavoidable (prefer the repository)
+    # objects = MyEntityManager()
+
+    # 4. Meta — naming, indexes, constraints
     class Meta:
         verbose_name = "my entity"
         verbose_name_plural = "my entities"
@@ -38,24 +65,7 @@ class MyEntity(models.Model):
             models.UniqueConstraint(fields=["slug"], name="uq_%(class)s_slug"),
         ]
 
-    # 2. Identifiers — slugs, external refs (PK is handled by Django's BigAutoField)
-    slug = models.SlugField(max_length=255)
-
-    # 3. Time fields — created, updated, any dates/datetimes
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    # 4. Workflow / status / state (if applicable)
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="draft")
-
-    # 5. Everything else — domain fields
-    name = models.CharField(max_length=255)
-    description = models.TextField(blank=True)
-
-    # 6. Relations — ForeignKey, OneToOne, ManyToMany (always last among fields)
-    category = models.ForeignKey("categories.Category", on_delete=models.CASCADE)
-
-    # 7. __str__ — only if useful, and the only method allowed
+    # 5. Methods — __str__ and any dunder methods. No business logic.
     def __str__(self) -> str:
         return self.name
 ```
@@ -64,9 +74,15 @@ class MyEntity(models.Model):
 
 ## Rules
 
-### Meta First
+### Member Order
 
-`class Meta` is **always** the first thing inside the model body — before any field. This is non-negotiable. It puts the most important structural information (naming, indexes, ordering, constraints) at the top where it's immediately visible.
+The model body reads in this exact order: **choices → fields → manager → Meta → methods.** Anything else is wrong:
+
+1. **Inner choice classes** (`models.TextChoices`, `models.IntegerChoices`) come first, so they sit at the top of the model and the field that uses them references a name that's already in scope.
+2. **Fields** in the sub-order from the next section.
+3. **Manager assignments** (`objects = ...`) if any — but in this project, custom managers are an escape hatch, not the default. Push query logic into the repository instead.
+4. **`class Meta`** — the metadata block.
+5. **Methods** — `__str__` and any dunder methods. Models contain no business logic, so this section is short.
 
 The ordering inside `Meta` itself:
 
@@ -240,6 +256,33 @@ from django.db import models
 
 
 class Order(models.Model):
+    # Choices
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        PAID = "paid", "Paid"
+        SHIPPED = "shipped", "Shipped"
+        CANCELLED = "cancelled", "Cancelled"
+
+    # Identifiers
+    idempotency_key = models.CharField(
+        verbose_name="idempotency key",
+        max_length=255,
+        help_text="Client-generated key to prevent duplicate order submissions.",
+    )
+
+    # Time
+    date = models.DateTimeField(auto_now_add=True)
+
+    # Status
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PENDING,
+    )
+
+    # Domain
+    total = models.DecimalField(max_digits=12, decimal_places=2)
+
     class Meta:
         verbose_name = "order"
         verbose_name_plural = "orders"
@@ -254,34 +297,11 @@ class Order(models.Model):
             ),
         ]
 
-    # Identifiers
-    idempotency_key = models.CharField(
-        verbose_name="idempotency key",
-        max_length=255,
-        help_text="Client-generated key to prevent duplicate order submissions.",
-    )
-
-    # Time
-    date = models.DateTimeField(auto_now_add=True)
-
-    # Status
-    status = models.CharField(max_length=20, default="pending")
-
-    # Domain
-    total = models.DecimalField(max_digits=12, decimal_places=2)
-
     def __str__(self) -> str:
         return f"Order {self.id} on {self.date}"
 
 
 class OrderItem(models.Model):
-    class Meta:
-        verbose_name = "order item"
-        verbose_name_plural = "order items"
-        indexes = [
-            models.Index(fields=["order", "product"], name="idx_%(class)s_ord_prd"),
-        ]
-
     # Domain
     quantity = models.PositiveIntegerField()
     price_at_purchase = models.DecimalField(
@@ -294,6 +314,13 @@ class OrderItem(models.Model):
     # Relations
     order = models.ForeignKey(Order, related_name="items", on_delete=models.CASCADE)
     product = models.ForeignKey("products.Product", on_delete=models.CASCADE)
+
+    class Meta:
+        verbose_name = "order item"
+        verbose_name_plural = "order items"
+        indexes = [
+            models.Index(fields=["order", "product"], name="idx_%(class)s_ord_prd"),
+        ]
 
     def __str__(self) -> str:
         return f"{self.quantity}x (Order {self.order_id})"
@@ -313,7 +340,8 @@ make test
 
 ## Checklist
 
-- [ ] `class Meta` is the first thing inside the model body
+- [ ] Member order: choices → fields → manager (rare) → Meta → methods
+- [ ] Inline `TextChoices` / `IntegerChoices` classes appear before fields, used by name in their field's `choices=`
 - [ ] `verbose_name` and `verbose_name_plural` are set
 - [ ] Primary key uses Django's default `BigAutoField` — no explicit PK field unless required by domain
 - [ ] Field order: identifiers → time → status/state → domain → relations

@@ -45,7 +45,7 @@ Then edit the generated `src/apps/<app>/apps.py` so the `name` attribute uses th
 
 Follow the **django-models** skill for full conventions. The key rules:
 
-- `class Meta` is **always first** inside the model body — with `verbose_name`, `verbose_name_plural`, and `indexes`
+- Member order: **choices → fields → manager (rare) → Meta → methods**
 - Use Django's default `BigAutoField` for primary keys — do NOT define explicit PK fields
 - All indexes in `Meta.indexes` — never `db_index=True` on fields
 - ZERO business logic — no custom managers, no `save()` overrides, no signals, no properties that compute
@@ -56,15 +56,15 @@ from django.db import models
 
 
 class MyEntity(models.Model):
+    created_at = models.DateTimeField(auto_now_add=True)
+    name = models.CharField(max_length=255)
+
     class Meta:
         verbose_name = "my entity"
         verbose_name_plural = "my entities"
         indexes = [
             models.Index(fields=["created_at"], name="idx_%(class)s_created"),
         ]
-
-    created_at = models.DateTimeField(auto_now_add=True)
-    name = models.CharField(max_length=255)
 
     def __str__(self):
         return self.name
@@ -299,7 +299,7 @@ make test
 
 ## COMPLETION CHECKLIST
 
-- [ ] Model in `src/apps/<app>/models.py`: `Meta` first, `BigAutoField` PK, zero logic
+- [ ] Model in `src/apps/<app>/models.py`: choices → fields → Meta → methods order, `BigAutoField` PK, zero logic
 - [ ] DTO in `src/apps/<app>/dtos.py`: `from_attributes=True`
 - [ ] Repository in `src/apps/<app>/repositories.py`: returns DTOs only
 - [ ] Service in `src/apps/<app>/services.py`: repos via `__init__`, zero ORM
