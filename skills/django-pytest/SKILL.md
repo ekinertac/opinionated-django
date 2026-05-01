@@ -20,7 +20,7 @@ Service tests are the most valuable layer and should outnumber the others. If a 
 
 Tests live inside each app: `src/apps/<app>/tests/test_repo.py`, `test_service.py`, `test_api.py`.
 
-All commands run inside the `web` container — the project uses Docker Compose for local development. Outside Compose, `postgres` and `redis` won't resolve. See the `django-docker` skill for the stack.
+All commands run inside the `web` container — the project uses Docker Compose for local development. Outside Compose, `postgres` and `redis` won't resolve. See the `django-docker` skill for the stack and the Makefile that wraps the common commands.
 
 ## Dependencies
 
@@ -327,8 +327,8 @@ def test_expires_at_is_24h_from_now():
 ## Verify
 
 ```bash
-docker compose run --rm web uv run pytest
-docker compose run --rm web uv run pytest -m "not slow"       # fast loop
-docker compose run --rm web uv run pytest src/apps/orders/    # one app
-docker compose run --rm web uv run pytest --lf                # re-run last failures
+make test                                                        # full suite
+docker compose run --rm web uv run pytest -m "not slow"          # fast loop
+docker compose run --rm web uv run pytest src/apps/orders/       # one app
+docker compose run --rm web uv run pytest --lf                   # re-run last failures
 ```

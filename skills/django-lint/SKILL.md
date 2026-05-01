@@ -6,11 +6,13 @@ allowed-tools: Bash, Read, Edit
 
 # Lint and Type-Check
 
-Run the full static-analysis suite on the project and fix any issues found. All commands run inside the `web` container — the project uses Docker Compose for local development.
+Run the full static-analysis suite on the project and fix any issues found. All commands run inside the `web` container via the project Makefile.
 
-1. `docker compose run --rm web uv run ruff check src` — lint the code
-2. `docker compose run --rm web uv run ruff format --check src` — verify formatting
-3. `docker compose run --rm web uv run pyrefly check src` — static type analysis
+1. `make lint` — lint the code (ruff check)
+2. `make format-check` — verify formatting (ruff format --check, no changes)
+3. `make typecheck` — static type analysis (pyrefly)
+
+Or run all three at once: `make check`.
 
 Fix every issue reported (re-run until clean) and report a short summary of what changed when done. If a failure is not auto-fixable, explain what needs human judgement rather than silencing it.
 

@@ -100,10 +100,8 @@ def test_receiver_is_idempotent():
 ## VERIFY
 
 ```bash
-docker compose run --rm web uv run ruff check src
-docker compose run --rm web uv run ruff format --check src
-docker compose run --rm web uv run pyrefly check src
-docker compose run --rm web uv run pytest
+make check    # lint + format-check + typecheck
+make test
 ```
 
 If anything fails, fix it and re-run.

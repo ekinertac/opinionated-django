@@ -262,7 +262,7 @@ def fake_product_service():
 ## Verify
 
 ```bash
-docker compose run --rm web uv run ruff check src
-docker compose run --rm web uv run pyrefly check src
-docker compose run --rm web uv run pytest
+make lint
+make typecheck
+make test
 ```

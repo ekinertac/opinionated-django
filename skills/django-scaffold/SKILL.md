@@ -407,17 +407,15 @@ pythonpath = ["src"]
 
 ## Step 11: Verify
 
-All commands run inside the `web` container (after `django-docker` has scaffolded the Compose stack):
+All commands run inside the `web` container via the Makefile (after `django-docker` has scaffolded the Compose stack and Makefile):
 
 ```bash
 docker compose run --rm web uv run python manage.py check
-docker compose run --rm web uv run ruff check src
-docker compose run --rm web uv run ruff format --check src
-docker compose run --rm web uv run pyrefly check src
-docker compose run --rm web uv run pytest
+make check    # lint + format-check + typecheck
+make test
 ```
 
-All five must pass. Fix any issue rather than silencing it.
+All three must pass. Fix any issue rather than silencing it.
 
 ## COMPLETION CHECKLIST
 

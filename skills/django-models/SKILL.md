@@ -306,11 +306,9 @@ class OrderItem(models.Model):
 After creating or modifying models:
 
 ```bash
-docker compose run --rm web uv run python manage.py makemigrations && docker compose run --rm web uv run python manage.py migrate
-docker compose run --rm web uv run ruff check src
-docker compose run --rm web uv run ruff format --check src
-docker compose run --rm web uv run pyrefly check src
-docker compose run --rm web uv run pytest
+make makemigrations && make migrate
+make check    # lint + format-check + typecheck
+make test
 ```
 
 ## Checklist
