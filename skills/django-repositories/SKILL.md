@@ -193,10 +193,12 @@ Rule of thumb: **if the child can be queried, listed, or modified outside the pa
 
 ## Pagination
 
-For large lists, return a paginated shape rather than `list[DTO]`:
+Two strategies. Use offset for small/bounded lists (admin tables, dashboards). Use cursor for unbounded lists (infinite scroll, public feeds, anything where the result set is large or growing).
+
+Define both shapes in `src/config/dtos.py` so every app shares them:
 
 ```python
-# src/apps/<app>/dtos.py
+# src/config/dtos.py
 from typing import Generic, TypeVar
 from pydantic import BaseModel
 
@@ -204,25 +206,79 @@ T = TypeVar("T")
 
 
 class Page(BaseModel, Generic[T]):
+    """Offset pagination — knows total, supports random-access pages."""
     items: list[T]
     total: int
     offset: int
     limit: int
+
+
+class CursorPage(BaseModel, Generic[T]):
+    """Cursor pagination — opaque cursor, no total, no random access. Stable under writes."""
+    items: list[T]
+    next_cursor: str | None = None
 ```
 
+### Offset pagination
+
 ```python
-# src/apps/products/repositories.py
 class ProductRepository:
     def list_paginated(self, *, offset: int = 0, limit: int = 50) -> Page[ProductDTO]:
-        qs = Product.objects.all()
+        qs = Product.objects.order_by("-id")
         total = qs.count()
         items = [ProductDTO.model_validate(o) for o in qs[offset:offset + limit]]
         return Page(items=items, total=total, offset=offset, limit=limit)
 ```
 
-The view passes `offset` / `limit` through from query params. DRF's pagination machinery is bypassed because pagination is part of the repo/service contract, not view config — that keeps it visible in tests.
+Trade-offs:
+- ✅ Total count for "page X of Y" UI.
+- ✅ Random-access pages (`?offset=500&limit=50`).
+- ❌ `count()` on a large table is slow (full scan unless an index covers the filter).
+- ❌ **Inconsistent under concurrent writes** — if a row is inserted at offset 0 between `?offset=50` and `?offset=100`, the user sees one row twice or skips one.
+- ❌ Deep pagination is `O(offset)` in Postgres — `OFFSET 100000` reads and discards 100,000 rows.
 
-A shared `Page[T]` Pydantic model can live in `src/config/dtos.py` once it's used in more than one app.
+Use for moderate sizes (a few thousand rows max) where the count is needed.
+
+### Cursor pagination
+
+```python
+class ProductRepository:
+    def list_paginated_cursor(
+        self, *, cursor: str | None = None, limit: int = 50
+    ) -> CursorPage[ProductDTO]:
+        qs = Product.objects.order_by("-id")
+        if cursor is not None:
+            qs = qs.filter(id__lt=int(cursor))
+        # Fetch one extra to detect whether there's a next page.
+        rows = list(qs[: limit + 1])
+        has_next = len(rows) > limit
+        rows = rows[:limit]
+        next_cursor = str(rows[-1].id) if has_next and rows else None
+        return CursorPage(
+            items=[ProductDTO.model_validate(o) for o in rows],
+            next_cursor=next_cursor,
+        )
+```
+
+Trade-offs:
+- ✅ Stable under concurrent writes — each cursor points to a real row, not a position.
+- ✅ Constant time per page regardless of depth.
+- ✅ No `count()` cost.
+- ❌ No total. No "page 5 of 200" UI.
+- ❌ No backwards navigation without an extra mechanism (a `prev_cursor` requires reversing the query).
+- ❌ The order-by column MUST be unique and indexed — if you order by `created_at` alone, ties produce duplicate cursors. Use `(created_at, id)` ordering and a tuple cursor for stability.
+
+The cursor here is just `str(id)` — opaque to the client, internally a primary key. If you want it truly opaque, base64-encode it: `base64.urlsafe_b64encode(str(rows[-1].id).encode()).decode()`. Decode in the next request.
+
+### Picking between them
+
+| Case | Use |
+|---|---|
+| Admin table, paginated UI, "page 3 of 17" | Offset (`Page[T]`) |
+| Infinite-scroll feed, public listings, mobile API | Cursor (`CursorPage[T]`) |
+| API that exposes both? | Two methods on the repo (`list_paginated` and `list_paginated_cursor`) — let the view route between them based on query params |
+
+The view passes pagination params through from query string. DRF's pagination machinery is bypassed because pagination is part of the repo/service contract, not view config — keeps it visible in tests.
 
 ## Testing
 

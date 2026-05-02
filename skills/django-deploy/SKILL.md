@@ -509,6 +509,92 @@ The role:
 
 This is a single-host Postgres — a planned single point of failure for the v1 topology. Streaming replication via `repmgr` or a managed standby is a follow-on (`django-postgres-ha`, future skill).
 
+#### pgbouncer — connection pooling on the `db` host
+
+Django opens one Postgres connection per gunicorn worker. With `workers = 2 * CPU + 1` and a few CPUs across N web hosts, you're easily into hundreds of concurrent connections — Postgres handles this poorly (each connection is a forked process with its own memory). pgbouncer pools incoming connections so Postgres only sees a small fixed number of backend connections, regardless of how many workers your fleet has.
+
+Add a pgbouncer container next to Postgres on the `db` host:
+
+`deploy/roles/postgres/templates/compose.pgbouncer.yml.j2`:
+
+```yaml
+services:
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    restart: unless-stopped
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: "{{ postgres_user }}"
+      DB_PASSWORD: "{{ postgres_password }}"
+      DB_NAME: "{{ postgres_db }}"
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: "1000"
+      DEFAULT_POOL_SIZE: "20"
+      AUTH_TYPE: scram-sha-256
+    ports:
+      - "{{ private_ip }}:6432:5432"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - default
+```
+
+Run pgbouncer in the same Docker network as Postgres so it reaches `postgres:5432` directly. The published port `6432` is the one web/worker hosts connect to.
+
+Update `.env.production` so the app talks to pgbouncer instead of Postgres directly:
+
+```
+POSTGRES_HOST=db-01.internal
+POSTGRES_PORT=6432         # pgbouncer, not 5432
+```
+
+And update the production settings — **drop `CONN_MAX_AGE`** when using pgbouncer in transaction mode:
+
+```python
+# src/config/settings/production.py
+DATABASES = {
+    "default": {
+        # ...
+        "CONN_MAX_AGE": 0,    # let pgbouncer pool, not Django
+        "OPTIONS": {
+            "sslmode": config("POSTGRES_SSLMODE", default="require"),
+            # transaction-mode pgbouncer can't hold prepared statements across requests
+            "options": "-c default_transaction_isolation=read_committed",
+        },
+    }
+}
+
+# Disable Django's prepared-statement cache for pgbouncer transaction mode
+# (see "Caveats" below)
+```
+
+##### Pool modes — choose `transaction`
+
+| Mode | Behavior | Suitable? |
+|---|---|---|
+| `session` | One backend connection per client connection until the client disconnects | No — defeats pooling at scale |
+| `transaction` | Backend connection assigned per transaction, returned to pool on commit/rollback | ✅ Yes |
+| `statement` | Backend connection per statement | No — breaks multi-statement transactions |
+
+##### Caveats with `pool_mode = transaction`
+
+Transaction-mode pgbouncer hands out a different backend connection per transaction, so anything that depends on session-level state across statements stops working:
+
+- **Prepared statements** — break across requests. Disable Django's prepared-statement cache: set `DISABLE_SERVER_SIDE_CURSORS = True` and avoid `psycopg`'s prepared-statement caching. With Django 4.2+ on psycopg 3, prepared statements are off by default — but verify with `EXPLAIN` that you're not seeing `_pgbouncer_*` prepared statement names in your slow query logs.
+- **`SET LOCAL` / `SET ROLE`** — only persist for the transaction. `SET` (without `LOCAL`) leaks across transactions and breaks isolation. Avoid both unless you know what you're doing.
+- **`LISTEN` / `NOTIFY`** — don't work. Use Celery instead.
+- **Server-side cursors** — broken. Setting `DISABLE_SERVER_SIDE_CURSORS = True` is required.
+- **Advisory locks** — only safe inside a transaction. Don't try to hold one across requests.
+- **`CONN_MAX_AGE > 0`** — pointless. Django would hold a connection open across requests, but the pgbouncer side doesn't preserve session state, so the optimization doesn't help and can mask issues.
+
+##### Why this is worth the constraints
+
+A web fleet of 4 hosts × 9 workers = 36 worker processes. With direct Postgres each process holds a connection (36 connections, often idle). With pgbouncer in transaction mode and `DEFAULT_POOL_SIZE: 20`, Postgres sees at most 20 active backends regardless of worker count. Connections become a flow concept, not a static allocation.
+
+The bookkeeping (no LISTEN/NOTIFY, careful prepared statements) is easy compared to running out of `max_connections` in production.
+
 ### 8c. Redis — the `redis_broker` and `redis_cache` hosts
 
 Two Redis instances with different durability profiles. Same role, different vars.
@@ -1151,6 +1237,8 @@ gunzip -c /srv/postgres/backups/$(date +%F).sql.gz | docker exec -i postgres-sta
 - [ ] HAProxy admin socket enabled at `/var/run/haproxy/admin.sock`; `socat` installed on the LB host
 - [ ] `compose.prod.yml`'s `web` service has `stop_grace_period` ≥ gunicorn's `graceful_timeout`
 - [ ] Postgres running on `db`, listening on the private IP only, firewall blocks public
+- [ ] pgbouncer container alongside Postgres on `db`, mode `transaction`, app connects to port 6432
+- [ ] `CONN_MAX_AGE = 0` in production settings (pgbouncer pools, not Django)
 - [ ] Two Redis instances: broker (AOF on), cache (LRU eviction, no AOF)
 - [ ] GlitchTip running on `glitchtip`, fronted by HAProxy on its own subdomain
 - [ ] All host-to-host traffic over the private network

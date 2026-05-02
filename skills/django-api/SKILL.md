@@ -302,7 +302,95 @@ Putting "does this user own this row?" in a DRF `BasePermission.has_object_permi
 
 DRF permissions stay at the request level; data-aware authorization rides on top of the service's normal exception path.
 
-## Step 6: Error handling
+## Step 6: Rate limiting
+
+DRF has built-in throttling that runs after authentication and permissions. Three classes cover most needs:
+
+- **`AnonRateThrottle`** — limits unauthenticated clients by IP. Defends against scrapers and bots.
+- **`UserRateThrottle`** — limits authenticated users by user ID. Defends against runaway clients and lets you offer different rates per tier.
+- **`ScopedRateThrottle`** — per-endpoint rates. Tighter limits on expensive or abuse-prone actions (login, signup, password reset).
+
+Configure global defaults in `src/config/settings/base.py`:
+
+```python
+REST_FRAMEWORK = {
+    # ...existing entries...
+    "DEFAULT_THROTTLE_CLASSES": [
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+    ],
+    "DEFAULT_THROTTLE_RATES": {
+        "anon": "100/hour",
+        "user": "1000/hour",
+        # Scoped rates — referenced by `throttle_scope` on individual viewsets
+        "login": "5/min",
+        "signup": "10/hour",
+        "password_reset": "3/hour",
+    },
+}
+```
+
+Per-endpoint scoped throttling on a viewset:
+
+```python
+from rest_framework.throttling import ScopedRateThrottle
+
+
+class AuthViewSet(viewsets.ViewSet):
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "login"
+
+    @action(detail=False, methods=["post"])
+    def login(self, request):
+        ...
+```
+
+To use a different scope per action, override `get_throttles()`:
+
+```python
+class AccountViewSet(viewsets.ViewSet):
+    throttle_classes = [ScopedRateThrottle]
+
+    def get_throttles(self):
+        if self.action == "reset_password":
+            self.throttle_scope = "password_reset"
+        elif self.action == "create":
+            self.throttle_scope = "signup"
+        return super().get_throttles()
+```
+
+Throttle state is stored in the cache backend — the same `redis_cache` instance from **django-deploy**. Without a fast cache, throttling becomes a database query per request.
+
+### Edge throttling
+
+App-layer throttling protects against well-behaved abusers. For DDoS and scrape floods, the LB and CDN should drop traffic before it ever reaches the app:
+
+- **HAProxy** has built-in `stick-table` rate limiting per source IP.
+- **CloudFlare** / **CloudFront** terminates obvious abuse before it reaches origin.
+
+Edge throttling is out of scope for this skill — it's an ops concern. The app-layer rate limits documented above are the floor; edge rate limits are an additional layer.
+
+### Custom throttle classes
+
+For project-specific rules (per-org rate limits, per-API-key limits), subclass `SimpleRateThrottle`:
+
+```python
+from rest_framework.throttling import SimpleRateThrottle
+
+
+class OrgRateThrottle(SimpleRateThrottle):
+    scope = "org"
+
+    def get_cache_key(self, request, view):
+        if not request.user.is_authenticated:
+            return None
+        org_id = request.user.organization_id
+        return self.cache_format % {"scope": self.scope, "ident": org_id}
+```
+
+Add the rate to `DEFAULT_THROTTLE_RATES["org"] = "10000/hour"` and include the class in `throttle_classes`.
+
+## Step 7: Error handling
 
 DRF's default exception handler covers serializer validation. The project's `config/exception_handler.py` catches the standard Python exceptions services raise and maps them to HTTP. Together they form a single coherent response layer.
 
@@ -317,7 +405,7 @@ DRF's default exception handler covers serializer validation. The project's `con
 
 Why services use Python's standard exceptions, not DRF's: the service is HTTP-unaware. It signals "bad input", "missing record", "forbidden" using language-standard semantics; the handler at the edge translates them to HTTP. This keeps services testable without an HTTP context and keeps the HTTP-mapping logic in exactly one file.
 
-## Step 7: OpenAPI schemas via drf-spectacular
+## Step 8: OpenAPI schemas via drf-spectacular
 
 `drf-spectacular` introspects request schemas from Serializers automatically. **Response schemas are not auto-discovered** because views return `dto.model_dump()` (a plain dict), not a Serializer.
 
@@ -393,7 +481,7 @@ If you'd rather not add `drf-pydantic`, the alternative is maintaining a paralle
 
 `drf-spectacular`'s defaults are sensible; reach for `@extend_schema` to fix specific issues, not preemptively.
 
-## Step 8: API versioning — URL path
+## Step 9: API versioning — URL path
 
 Recommendation: URL-path versioning. Visible in logs, easy to test, curl-friendly. Header-based versioning is academically cleaner but operationally annoying.
 
@@ -417,7 +505,7 @@ When `/v2/` becomes necessary:
 3. `/v1/` keeps working until consumers migrate.
 4. Deprecate publicly with a sunset date.
 
-## Step 9: File uploads
+## Step 10: File uploads
 
 Two patterns. Pick by file size.
 
@@ -543,6 +631,7 @@ The OpenAPI validation catches schema issues before they reach API consumers —
 - [ ] Custom domain actions use `@action`, never bolted into `ServiceMixin`
 - [ ] Authentication classes configured globally in `REST_FRAMEWORK`; project-specific class is documented somewhere
 - [ ] Request-level permissions in DRF `permission_classes` / `get_permissions()`; data-level checks raise `PermissionError` from the service
+- [ ] Throttling configured: `AnonRateThrottle` + `UserRateThrottle` globally; `ScopedRateThrottle` on abuse-prone actions (login, signup, password reset) with rates in `DEFAULT_THROTTLE_RATES`
 - [ ] DTO inherits from `drf_pydantic.BaseModel` so `@extend_schema(responses={...: DTO.drf_serializer})` works
 - [ ] `@extend_schema` declarations on every action that returns data, with `tags`, `responses`, and at least one `OpenApiExample` per shape
 - [ ] URLs include `api/v1/` prefix; new apps wired in `config/urls.py`
