@@ -76,7 +76,7 @@ Skills install with a single command:
 npx skills add ekinertac/opinionated-django
 
 # Or just one
-npx skills add ekinertac/opinionated-django/django-scaffold|django-docker|django-architecture|django-models|django-repositories|django-services|django-api|django-signals|django-settings|django-pytest|django-lint|django-deploy
+npx skills add ekinertac/opinionated-django/django-scaffold|django-docker|django-architecture|django-models|django-repositories|django-services|django-api|django-signals|django-settings|django-pytest|django-lint|django-cache|django-deploy|django-ci
 ```
 
 Your agent will pick them up automatically on its next run. You can also clone the repo and point your agent at `skills/` directly.
@@ -118,8 +118,14 @@ Three-layer pytest setup — `test_repo.py`, `test_service.py`, `test_api.py` �
 ### `django-lint`
 Runs `ruff check`, `ruff format --check`, and `pyrefly check`, then fixes whatever it finds. Use before committing, or any time you want a clean bill of health.
 
+### `django-cache`
+Application-level caching using the dedicated `redis_cache` instance (separate from the Celery broker). Cache-aside pattern in repository methods, key naming convention, TTL strategy with jitter, explicit invalidation on writes, and a clear list of what NOT to cache (money, auth state, list queries until profiling says otherwise).
+
 ### `django-deploy`
-Mid-scale production deployment, self-hosted by Ansible — multi-stage Dockerfile, gunicorn, `/healthz` and `/readyz` endpoints, JSON logging, an Ansible playbook with Vault-encrypted secrets that does a rolling deploy across N web hosts behind a self-hosted HAProxy load balancer (TLS via Let's Encrypt), separate beat-singleton + N celery worker hosts, self-hosted Postgres with backups, two self-hosted Redis instances (broker and cache), and self-hosted GlitchTip for errors. The pragmatic external dependencies are S3 (static and media), AWS SES (email — deliverability is its own game), and Let's Encrypt (TLS). Everything else is configured from code so an agent can stand it up end-to-end.
+Mid-scale production deployment, self-hosted by Ansible — multi-stage Dockerfile, gunicorn, `/healthz` and `/readyz` endpoints, JSON logging, an Ansible playbook with Vault-encrypted secrets that does a zero-downtime rolling deploy (HAProxy admin-socket drain → swap → readyz → resume) across N web hosts behind a self-hosted HAProxy load balancer (TLS via Let's Encrypt), separate beat-singleton + N celery worker hosts, self-hosted Postgres with backups, two self-hosted Redis instances (broker and cache), and self-hosted GlitchTip for errors. The pragmatic external dependencies are S3 (static and media), AWS SES (email — deliverability is its own game), and Let's Encrypt (TLS). Everything else is configured from code so an agent can stand it up end-to-end.
+
+### `django-ci`
+GitHub Actions pipeline — lint, format check, type check, and tests against real Postgres + Redis service containers; on `master`, builds the production Docker image (`--target prod`) and pushes a SHA-tagged image to GHCR. No auto-deploy — `make deploy IMAGE_TAG=<sha>` stays a deliberate human action.
 
 ## The Patterns at a Glance
 
