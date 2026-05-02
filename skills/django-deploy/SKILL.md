@@ -151,6 +151,7 @@ services:
     ports:
       - "127.0.0.1:8000:8000"   # only the LB on the same private network reaches this
     restart: unless-stopped
+    stop_grace_period: 35s     # ≥ gunicorn graceful_timeout so in-flight requests complete
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"]
       interval: 30s
@@ -417,6 +418,8 @@ HAProxy terminates TLS and forwards to the web hosts. Certificates come from Let
 global
     log stdout format raw local0
     maxconn 4096
+    # Admin socket used by the deploy play to drain hosts before container swap
+    stats socket /var/run/haproxy/admin.sock mode 660 level admin expose-fd listeners
 
 defaults
     log     global
@@ -441,9 +444,13 @@ backend django_web
     http-check expect status 200
     balance roundrobin
 {% for host in groups['web'] %}
-    server {{ host }} {{ hostvars[host].ansible_host | default(host) }}:8000 check
+    server {{ host.split('.')[0] }} {{ hostvars[host].ansible_host | default(host) }}:8000 check
 {% endfor %}
 ```
+
+The admin socket lets Ansible mark a server as "draining" before the container swap. The `server` directive uses the short hostname (`web-01`) so the deploy play can refer to it without the full FQDN.
+
+Install `socat` on the LB host (one-line role task) so Ansible can talk to the admin socket via a single shell command.
 
 Renewal hook concatenates the cert+key into HAProxy's combined PEM format:
 
@@ -864,14 +871,27 @@ Run with `make provision`. Idempotent — subsequent runs only change what's dri
           web python manage.py collectstatic --noinput
         chdir: /opt/app
 
-- name: Rolling restart of web hosts
+- name: Rolling restart of web hosts (zero-downtime)
   hosts: web
   serial: 1
   become: true
   vars:
     image_tag: "{{ hostvars['localhost'].image_tag }}"
+    short_name: "{{ inventory_hostname.split('.')[0] }}"
   tasks:
-    - name: Restart web
+    - name: Drain — tell HAProxy to stop sending new traffic to this host
+      ansible.builtin.shell:
+        cmd: |
+          echo "set server django_web/{{ short_name }} state drain" \
+            | socat stdio unix-connect:/var/run/haproxy/admin.sock
+      delegate_to: "{{ groups['lb'][0] }}"
+      become: true
+
+    - name: Wait for in-flight requests to complete
+      ansible.builtin.pause:
+        seconds: 30
+
+    - name: Restart web with new image
       ansible.builtin.command:
         cmd: docker compose -f /opt/app/compose.prod.yml up -d web
         chdir: /opt/app
@@ -880,12 +900,34 @@ Run with `make provision`. Idempotent — subsequent runs only change what's dri
         IMAGE_REGISTRY: "{{ image_registry }}"
         IMAGE_NAME: "{{ image_name }}"
 
-    - name: Wait for /readyz
+    - name: Wait for /readyz to return 200
       ansible.builtin.uri:
         url: "http://{{ inventory_hostname }}:8000/readyz"
         status_code: 200
       retries: 30
       delay: 2
+
+    - name: Resume — tell HAProxy to send traffic to this host again
+      ansible.builtin.shell:
+        cmd: |
+          echo "set server django_web/{{ short_name }} state ready" \
+            | socat stdio unix-connect:/var/run/haproxy/admin.sock
+      delegate_to: "{{ groups['lb'][0] }}"
+      become: true
+
+  rescue:
+    # Always resume routing if anything failed mid-deploy — better to take
+    # traffic on the old container than leave the host marked drain forever.
+    - name: Resume HAProxy routing on failure
+      ansible.builtin.shell:
+        cmd: |
+          echo "set server django_web/{{ short_name }} state ready" \
+            | socat stdio unix-connect:/var/run/haproxy/admin.sock
+      delegate_to: "{{ groups['lb'][0] }}"
+      become: true
+
+    - ansible.builtin.fail:
+        msg: "Rolling restart failed on {{ inventory_hostname }}"
 
 - name: Restart the beat host (worker + beat — singleton)
   hosts: worker_beat
@@ -953,11 +995,38 @@ GLITCHTIP_DSN={{ glitchtip_dsn }}
 Rolling deploy semantics:
 
 1. Migrations run **before** any web container restarts. New code starts on a schema that's already migrated.
-2. `serial: 1` on the web play restarts one host at a time. The LB drains in-flight requests, the host pulls the new image, the new container starts, `/readyz` is polled until 200, then the next host begins.
+2. `serial: 1` on the web play restarts one host at a time, with explicit drain via the HAProxy admin socket: mark drain → wait 30s for in-flight requests to complete → restart container → wait for `/readyz` → mark ready. No requests dropped.
 3. `worker_beat` restarts before the additional `worker` hosts so beat is briefly the only Celery process during cutover.
 4. Worker hosts pick up new code without losing in-flight tasks (graceful shutdown drains the queue).
+5. The `rescue` block on the web play guarantees the host returns to "ready" in HAProxy even if anything mid-restart fails — better to serve traffic on the old container than leave a host stuck in drain forever.
 
-For non-backwards-compatible migrations, use the expand-contract pattern (separate skill, `django-migrations-scale`).
+## Zero-downtime — what makes it actually zero
+
+The rolling deploy is zero-downtime in the strict sense (no dropped requests) because three pieces coordinate:
+
+**1. HAProxy drain via admin socket.** Without this, HAProxy keeps routing to the host until `/healthz` fails — those failed checks ARE dropped requests. The drain command tells HAProxy "finish current connections, send no new ones," and the deploy waits 30s before touching the container. After the new container is healthy, the play marks the host `ready` again.
+
+**2. gunicorn graceful shutdown.** Docker sends SIGTERM when the container is stopped; gunicorn (with `graceful_timeout = 30` from Step 3) stops accepting new requests, lets in-flight ones complete, then exits. Compose's `stop_grace_period: 35s` from Step 2 gives gunicorn enough time before SIGKILL. Without this, in-flight requests get killed mid-response.
+
+**3. Backwards-compatible migrations.** The migration runs at the start of the deploy, so during the rolling restart, OLD code is running against the NEW schema. Only some migration types are safe in this window:
+
+| Migration | Safe during rolling deploy? |
+|---|---|
+| Add a nullable column or one with a default | ✅ |
+| Add a table | ✅ |
+| Add a non-unique index | ✅ (use `CREATE INDEX CONCURRENTLY` for large tables) |
+| Add a unique constraint | ⚠️ may reject inserts that old code allowed |
+| Drop a column | ❌ old code may still reference it |
+| Rename a column | ❌ old code references the old name |
+| Change a column type | ❌ old code may not handle the new type |
+| Add a NOT NULL column without a default | ❌ old code's INSERTs lack the column |
+
+For unsafe migrations, two options:
+
+- **Expand-contract** — covered in the future `django-migrations-scale` skill. Multi-deploy dance: add new column alongside old, ship code that writes both, backfill, ship code that reads new, drop old.
+- **Maintenance window** — accept downtime. Take the LB out of rotation (mark all backends `maint`), run the migration, restart everything, mark `ready`. Use only when expand-contract isn't worth it (low-stakes admin tools, internal apps with off-hours windows).
+
+Most migrations are additive and fall into the safe column. The discipline is to recognize which is which before deploying.
 
 ## Step 13: Backups
 
@@ -1025,6 +1094,9 @@ Run from the repo root.
 - **`.env.production` committed to git.** Use Ansible Vault. The on-host file is generated by Ansible, never tracked.
 - **Vault password file inside the repo.** It belongs in `~/.config/django-deploy/`, never tracked.
 - **Backups never restored.** A backup is theoretical until you've done a restore drill. Schedule one quarterly minimum.
+- **Skipping the HAProxy drain step on rolling restart.** Without it, the LB keeps routing to a host while you swap its container — dropped requests on every deploy. The `socat` drain dance is what makes the deploy actually zero-downtime.
+- **`stop_grace_period` shorter than gunicorn's `graceful_timeout`.** Docker SIGKILLs in-flight requests before gunicorn finishes draining. Always set compose's `stop_grace_period` slightly higher than `graceful_timeout`.
+- **Shipping a destructive migration with a rolling deploy.** During the rolling restart, OLD code runs against the NEW schema. Drop-column, rename-column, change-type — these crash old code mid-deploy. Use expand-contract or a maintenance window.
 - **`POSTGRES_HOST_AUTH_METHOD: trust` on the app database.** That's only safe in GlitchTip's *internal* compose where the DB isn't exposed. The app's Postgres needs `scram-sha-256` and a strong `POSTGRES_PASSWORD`.
 - **Using `:latest` on GlitchTip.** Pin a version. The upstream project ships breaking changes.
 - **Skipping the SES domain verification step.** Email lands in spam folders or doesn't deliver at all.
@@ -1076,6 +1148,8 @@ gunzip -c /srv/postgres/backups/$(date +%F).sql.gz | docker exec -i postgres-sta
 - [ ] `deploy/inventory.yml` has groups: `lb`, `web`, `worker_beat`, `worker`, `db`, `redis_broker`, `redis_cache`, `glitchtip`
 - [ ] **Exactly one** host in `worker_beat`
 - [ ] HAProxy installed and configured on `lb`, with Let's Encrypt cert and auto-renew hook
+- [ ] HAProxy admin socket enabled at `/var/run/haproxy/admin.sock`; `socat` installed on the LB host
+- [ ] `compose.prod.yml`'s `web` service has `stop_grace_period` ≥ gunicorn's `graceful_timeout`
 - [ ] Postgres running on `db`, listening on the private IP only, firewall blocks public
 - [ ] Two Redis instances: broker (AOF on), cache (LRU eviction, no AOF)
 - [ ] GlitchTip running on `glitchtip`, fronted by HAProxy on its own subdomain
@@ -1089,7 +1163,9 @@ gunzip -c /srv/postgres/backups/$(date +%F).sql.gz | docker exec -i postgres-sta
 
 ### Deploy and operations
 - [ ] `deploy/playbooks/provision.yml` configures every infra host group
-- [ ] `deploy/playbooks/deploy.yml` runs migrations once, restarts web hosts serially with `/readyz` gating, restarts `worker_beat` then additional `worker` hosts
+- [ ] `deploy/playbooks/deploy.yml` runs migrations once, restarts web hosts serially with HAProxy drain → swap → `/readyz` → resume, restarts `worker_beat` then additional `worker` hosts
+- [ ] Web play has a `rescue` block that resumes HAProxy routing on failure (no host stuck in drain)
+- [ ] Migration is verified backwards-compatible before rolling deploy; destructive changes go through expand-contract or a maintenance window
 - [ ] `make provision`, `make deploy`, `make rollback TAG=…` all in the project Makefile
 - [ ] `python manage.py check --deploy` passes
 - [ ] First deploy logged + verified before automating subsequent deploys
