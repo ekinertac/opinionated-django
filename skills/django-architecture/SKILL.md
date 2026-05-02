@@ -112,7 +112,7 @@ RULES:
 - Contains all business logic: validation, orchestration, cross-repo coordination
 - Touches ZERO ORM — no `.objects`, no `F()`, no `Q()`, no model imports
 - Returns DTOs
-- **CRUD service convention:** if the service backs a resource ViewSet (`ServiceMixin` from **django-api**), expose `list_items`, `get_item`, `create_item`, `update_item`, `delete_item`. Generic names — the class already names the resource (`ProductService.list_items()`, not `list_products`). Domain-specific operations (`archive_product`, `restock_product`) keep their full names.
+- **`_item(s)` suffix on every method:** resource services use `list_items`, `get_item`, `create_item`, `update_item`, `delete_item` for CRUD AND `archive_item`, `restock_item`, `publish_item`, etc. for domain operations. The class name carries the resource — `ProductService.archive_item()` reads naturally; `archive_product` would be redundant noise. Strict consistency. Services that don't represent a resource (notifications, payments, search) skip the convention entirely.
 
 ### Layer 5: Register in svcs
 

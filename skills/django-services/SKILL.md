@@ -96,8 +96,8 @@ class ProductService:
     def delete_item(self, pk: int) -> None:
         self.repo.delete(pk)
 
-    # Domain-specific actions keep their full names — see "Naming" below
-    def archive_product(self, pk: int, *, user_id: int) -> ProductDTO:
+    # Domain operations follow the same _item suffix — see "Naming" below
+    def archive_item(self, pk: int, *, user_id: int) -> ProductDTO:
         product = self.repo.get_by_id(pk)
         if product.owner_id != user_id:
             raise PermissionError(f"User {user_id} cannot archive product {pk}")
@@ -113,9 +113,11 @@ Rules:
 - **Services are stateless.** They hold references to their dependencies and nothing else.
 - **Raise plain exceptions.** Use `ValueError`, `PermissionError`, `LookupError`, domain-specific exceptions — not `Http404` or anything Django-flavored.
 
-### CRUD service convention
+### Service method naming — `_item(s)` suffix everywhere
 
-Services that back a resource ViewSet (`ServiceMixin` from **django-api**) MUST expose these five method names:
+Every method on a resource service uses the generic `_item` (singular) or `_items` (plural) suffix. **No exceptions.** The class name (`ProductService`, `OrderService`) already carries the resource — repeating it on every method (`list_products`, `archive_product`) is redundant noise.
+
+Standard CRUD methods (required for `ServiceMixin` in **django-api**):
 
 | Method | Purpose | Returns |
 |---|---|---|
@@ -125,11 +127,19 @@ Services that back a resource ViewSet (`ServiceMixin` from **django-api**) MUST 
 | `update_item(pk: int, **fields)` | Update from validated input | `DTO` |
 | `delete_item(pk: int)` | Delete by primary key | `None` |
 
-Generic names — not `list_products`, `create_order`, etc. The service's class name (`ProductService`, `OrderService`) already carries the resource. `ProductService.list_products()` reads as redundant.
+Domain operations follow the same convention:
 
-Resource-specific names are reserved for **non-CRUD operations** — `archive_product`, `restock_product`, `recalculate_total`, etc. Those keep their full names because the operation is what's distinctive, not the resource.
+| Pattern | Examples |
+|---|---|
+| `<verb>_item` | `archive_item`, `publish_item`, `unpublish_item`, `restock_item`, `approve_item` |
+| `<verb>_items` | `bulk_create_items`, `archive_items_for_user` |
+| `<noun>_for_item` | `quote_for_item`, `permissions_for_item` |
 
-Services that don't fit the CRUD shape (notification senders, payment processors, search) skip the convention entirely. Their viewsets use a vanilla `viewsets.ViewSet` (no `ServiceMixin`) and call into the service via `get(SomeService)` directly.
+Read `ProductService.archive_item(pk)` as "the product service archives the item" — it parses naturally because the class establishes the resource context.
+
+**Why strict consistency matters here:** the moment you allow `archive_product` alongside `create_item`, every reader has to track two conventions. Picking one and applying it everywhere is the only way the convention pays off.
+
+Services that don't fit the resource pattern (notification senders, payment processors, search engines, batch jobs) skip the convention entirely — they don't represent a resource, they perform a service. `NotificationService.send(...)`, `PaymentService.charge(...)`, `SearchService.query(...)`. Their viewsets use a vanilla `viewsets.ViewSet` (no `ServiceMixin`) and call into the service via `get(SomeService)` directly.
 
 ### Cross-Entity Logic
 

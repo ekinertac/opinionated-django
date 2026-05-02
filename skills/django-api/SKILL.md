@@ -166,11 +166,11 @@ class ProductViewSet(ServiceMixin, viewsets.ViewSet):
     @action(detail=True, methods=["post"])
     def archive(self, request: AuthedRequest, pk=None):
         return dto_response(
-            self.service.archive_product(int(pk), user_id=request.user.id)
+            self.service.archive_item(int(pk), user_id=request.user.id)
         )
 ```
 
-Notice: `archive_product` (resource-specific) on the service, not `archive_item`. The CRUD naming convention applies only to the five standard methods; domain-specific operations keep their full names.
+The custom `@action` is on the **viewset** and uses a domain-specific name (`archive`) — that's how it appears in the URL (`/products/{pk}/archive/`). The **service method** it calls (`archive_item`) follows the universal `_item` suffix convention. View actions name the operation as it appears externally; service methods stay consistent within the class. See **django-services** for the full naming rule.
 
 ### When NOT to use `ServiceMixin`
 
@@ -287,11 +287,11 @@ What this tier checks: "does this user own this specific resource?", "is this ro
 
 ```python
 # in apps/products/services.py
-def archive_product(self, product_id: int, *, user_id: int) -> ProductDTO:
-    product = self.repo.get_by_id(product_id)
+def archive_item(self, pk: int, *, user_id: int) -> ProductDTO:
+    product = self.repo.get_by_id(pk)
     if product.owner_id != user_id:
-        raise PermissionError(f"User {user_id} cannot archive product {product_id}")
-    return self.repo.set_archived(product_id)
+        raise PermissionError(f"User {user_id} cannot archive product {pk}")
+    return self.repo.set_archived(pk)
 ```
 
 The view passes `user_id` from `request.user.id`; the service raises `PermissionError`; the central exception handler maps it to HTTP 403.

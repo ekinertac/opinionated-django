@@ -251,7 +251,7 @@ from apps.products.services import ProductService
 def test_create_product(make_product):
     service = ProductService(ProductRepository())
 
-    dto = service.create_product(name="Widget", price=Decimal("9.99"), stock=5)
+    dto = service.create_item(name="Widget", price=Decimal("9.99"), stock=5)
 
     assert dto.name == "Widget"
     assert dto.price == Decimal("9.99")
@@ -262,7 +262,7 @@ def test_create_product_rejects_negative_price():
     service = ProductService(ProductRepository())
 
     with pytest.raises(ValueError, match="price"):
-        service.create_product(name="Widget", price=Decimal("-1"), stock=5)
+        service.create_item(name="Widget", price=Decimal("-1"), stock=5)
 
 
 @pytest.mark.django_db
@@ -348,7 +348,7 @@ Receivers run via Celery. With `CELERY_TASK_ALWAYS_EAGER`, they execute in-proce
 @pytest.mark.django_db(transaction=True)
 def test_order_created_triggers_receiver(mocker):
     spy = mocker.patch("apps.orders.receivers.on_order_created", wraps=on_order_created)
-    # ...build real repos, call service.create_order(...), then:
+    # ...build real repos, call service.create_item(...), then:
     spy.assert_called_once()
 
 
