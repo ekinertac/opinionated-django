@@ -131,11 +131,16 @@ def _my_entity_service_factory(container: svcs.Container) -> MyEntityService:
 registry.register_factory(MyEntityService, _my_entity_service_factory)
 ```
 
-### Layer 6: API (Serializers + ViewSets)
+### Layer 6: Presentation — API and/or Templates
 
-Files: `src/apps/<app>/serializers.py`, `src/apps/<app>/views.py`, `src/apps/<app>/urls.py`.
+Two skills cover this slot. They're peers and can coexist (DRF for JSON consumers, templates for the web UI). The services and everything below are shared:
 
-Follow the **django-api** skill for full conventions, examples, and the checklist. The irreducible rules:
+- **`django-api`** — DRF Serializers + ViewSets, JSON responses. Read this for `/api/v1/` endpoints.
+- **`django-templates`** — Django Forms + function-based views + htmx + Alpine.js, HTML responses. Read this for server-rendered pages.
+
+Pick one, the other, or both based on what the project's UI needs.
+
+The irreducible rules for the **API** path (`django-api`):
 
 - Use `serializers.Serializer` for input validation. **NEVER `ModelSerializer`.**
 - Resource ViewSets inherit `ServiceMixin` from `config.api` (configure `service_class`, `create_serializer`, `update_serializer`). The default CRUD actions come for free; backing service must expose `list_items` / `get_item` / `create_item` / `update_item` / `delete_item`.
@@ -147,6 +152,16 @@ Follow the **django-api** skill for full conventions, examples, and the checklis
 - Custom domain actions (`archive`, `publish`, `restock`) stay as explicit `@action` methods on the viewset — never bolted into `ServiceMixin`.
 - Apps register their own router in `urls.py`; `config/urls.py` mounts them under `api/v1/`. Use `drf-nested-routers` for nested resources.
 - Annotate actions with `@extend_schema(responses={...: DTO.drf_serializer})` so OpenAPI docs reflect the actual output shape.
+
+The irreducible rules for the **Templates** path (`django-templates`):
+
+- Function-based views in `views.py`. `@login_required` per view, no globals.
+- `forms.Form` for input. **NEVER `ModelForm`.** Distinct Create / Update forms.
+- Templates in `src/templates/<app>/`; partials prefixed `_`. `base.html` carries `hx-headers` for global CSRF.
+- htmx requests return partial templates (detected via `request.htmx` from `django-htmx`); non-htmx POST redirects on success.
+- Alpine.js for client-side UI state only (dropdowns, modals). NEVER data fetching — that's htmx.
+- `ServiceExceptionMiddleware` (peer to DRF exception handler) maps service exceptions to HTML.
+- Both URL roots coexist in `config/urls.py`: `path("api/v1/", include("apps.<app>.urls_api"))` for DRF, `path("<resource>/", include("apps.<app>.urls"))` for HTML.
 
 ### Layer 7: Admin
 

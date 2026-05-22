@@ -18,7 +18,8 @@ Each layer encapsulates the one beneath it. The API layer never touches the ORM.
 
 | Layer           | Role                                              | Library                                                                                          |
 |-----------------|---------------------------------------------------|--------------------------------------------------------------------------------------------------|
-| **API**         | Routing, input validation, OpenAPI                | [DRF](https://www.django-rest-framework.org/) · [drf-spectacular](https://drf-spectacular.readthedocs.io/) · [drf-nested-routers](https://github.com/alanjds/drf-nested-routers) |
+| **Presentation (JSON)** | Routing, input validation, OpenAPI         | [DRF](https://www.django-rest-framework.org/) · [drf-spectacular](https://drf-spectacular.readthedocs.io/) · [drf-nested-routers](https://github.com/alanjds/drf-nested-routers) |
+| **Presentation (HTML)** | Server-rendered pages with interactivity   | [django-htmx](https://github.com/adamchainz/django-htmx) · [htmx](https://htmx.org/) · [Alpine.js](https://alpinejs.dev/)         |
 | **Service**     | Business logic & orchestration with true DI       | [svcs](https://svcs.hynek.me/)                                                                   |
 | **DTO**         | Typed data at every layer boundary                | [Pydantic v2](https://docs.pydantic.dev/)                                                        |
 | **Repository**  | All ORM access, transactions, prefetches          | [Django](https://www.djangoproject.com/)                                                         |
@@ -79,7 +80,7 @@ npx skills add ekinertac/opinionated-django/django-stack
 npx skills add ekinertac/opinionated-django
 
 # Or just one
-npx skills add ekinertac/opinionated-django/opinionated-django|django-scaffold|django-docker|django-architecture|django-models|django-repositories|django-services|django-api|django-signals|django-settings|django-pytest|django-lint|django-cache|django-email|django-deploy|django-ci|django-migrations-scale
+npx skills add ekinertac/opinionated-django/opinionated-django|django-scaffold|django-docker|django-architecture|django-models|django-repositories|django-services|django-api|django-templates|django-signals|django-settings|django-pytest|django-lint|django-cache|django-email|django-deploy|django-ci|django-migrations-scale
 ```
 
 Your agent will pick them up automatically on its next run. You can also clone the repo and point your agent at `skills/` directly.
@@ -114,6 +115,9 @@ Plain service classes with constructor-injected repositories, wired through an [
 
 ### `django-api`
 DRF Serializers for input validation, `viewsets.ViewSet` (never `ModelViewSet`) as thin dispatchers to services, URL routing with `drf-nested-routers` for nested resources, two-tier permissions (DRF classes for request-level, service exceptions for data-level), error mapping through the central exception handler, OpenAPI schemas via `drf-spectacular` + `drf-pydantic`, URL-path API versioning, and file-upload patterns including S3 signed URLs for large files.
+
+### `django-templates`
+Server-rendered HTML via Django templates + htmx + Alpine.js. Peer to `django-api` at the same architectural slot — both can coexist (DRF for `/api/v1/`, templates for `/products/`). Function-based views call services, render full pages or partial templates depending on `request.htmx`. Django Forms for input validation (never `ModelForm`). `ServiceExceptionMiddleware` maps service exceptions to HTML. Alpine.js for client-side UI state only — never data fetching. Coexistence pattern: same app, two URL roots, one service.
 
 ### `django-signals`
 Reliable signals for async side-effects — notifications, cache invalidation, analytics, cross-service coordination. Receivers are enqueued **inside** the database transaction via Celery, so rollbacks are respected and delivery is at-least-once.

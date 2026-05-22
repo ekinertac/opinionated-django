@@ -848,6 +848,154 @@ def readyz(_request):
 
 ---
 
+## 7b. Templates + htmx + Alpine (alternative / additional presentation)
+
+Peer to the DRF API layer above. Same architectural slot, different rendering strategy. Coexists with DRF in the same project (DRF for `/api/v1/`, templates for `/products/`).
+
+### Dependencies
+
+```bash
+docker compose exec web uv add django-htmx
+```
+
+Add to `INSTALLED_APPS`: `"django_htmx"`. Add to `MIDDLEWARE` (after `AuthenticationMiddleware`): `"django_htmx.middleware.HtmxMiddleware"` and `"config.middleware.ServiceExceptionMiddleware"` (last).
+
+### Function-based views
+
+```python
+from django.contrib.auth.decorators import login_required
+from django.shortcuts import render, redirect
+
+from config.services import get
+from .forms import CreateProductForm
+from .services import ProductService
+
+
+@login_required
+def product_list(request):
+    products = get(ProductService).list_items()
+    return render(request, "products/list.html", {"products": products})
+
+
+@login_required
+def product_create(request):
+    if request.method == "POST":
+        form = CreateProductForm(request.POST)
+        if form.is_valid():
+            product = get(ProductService).create_item(
+                user_id=request.user.id,
+                **form.cleaned_data,
+            )
+            if request.htmx:
+                return render(request, "products/_card.html", {"product": product})
+            return redirect("products:detail", pk=product.id)
+    else:
+        form = CreateProductForm()
+    return render(request, "products/create.html", {"form": form})
+```
+
+### Forms — `forms.Form` NEVER `ModelForm`
+
+```python
+from django import forms
+
+
+class CreateProductForm(forms.Form):
+    name = forms.CharField(max_length=255)
+    price = forms.DecimalField(max_digits=10, decimal_places=2, min_value=0)
+    stock = forms.IntegerField(min_value=0)
+```
+
+### Templates — `src/templates/<app>/`
+
+Partials prefixed `_`. `base.html` carries the global CSRF for htmx:
+
+```html
+<body hx-headers='{"X-CSRFToken": "{{ csrf_token }}"}'>
+```
+
+htmx swap example:
+
+```html
+<button hx-delete="{% url 'products:delete' product.id %}"
+        hx-target="#product-{{ product.id }}"
+        hx-swap="outerHTML"
+        hx-confirm="Delete?">
+  Delete
+</button>
+```
+
+### Alpine.js — UI state only, never data fetching
+
+```html
+<div x-data="{ open: false }">
+  <button @click="open = !open">Menu</button>
+  <ul x-show="open" @click.outside="open = false">...</ul>
+</div>
+```
+
+### HTML exception middleware (`src/config/middleware.py`)
+
+```python
+from django.contrib import messages
+from django.shortcuts import render
+
+
+class ServiceExceptionMiddleware:
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        return self.get_response(request)
+
+    def process_exception(self, request, exception):
+        if isinstance(exception, ValueError):
+            if getattr(request, "htmx", False):
+                return render(request, "errors/_inline.html", {"error": str(exception)}, status=400)
+            messages.error(request, str(exception))
+            return render(request, "errors/400.html", {"error": str(exception)}, status=400)
+        if isinstance(exception, LookupError):
+            return render(request, "errors/404.html", {"error": str(exception)}, status=404)
+        if isinstance(exception, PermissionError):
+            return render(request, "errors/403.html", {"error": str(exception)}, status=403)
+        return None
+```
+
+### URL coexistence
+
+```python
+# src/config/urls.py
+urlpatterns = [
+    path("admin/", admin.site.urls),
+    path("api/v1/", include("apps.products.urls_api")),    # DRF (ViewSet router)
+    path("products/", include("apps.products.urls")),       # HTML (function views)
+]
+```
+
+### Tests use `Client` with `HTTP_HX_REQUEST` for htmx path
+
+```python
+@pytest.mark.django_db
+def test_product_create_via_htmx(html_client):
+    response = html_client.post(
+        "/products/create/",
+        data={"name": "Gadget", "price": "12.50", "stock": "3"},
+        HTTP_HX_REQUEST="true",
+    )
+    assert response.status_code == 200
+    assert "products/_card.html" in [t.name for t in response.templates]
+```
+
+### Rules
+
+- Function-based views. `@login_required` per view.
+- `forms.Form`, NEVER `ModelForm`. Distinct Create + Update.
+- No ORM in views. `get(SomeService)` for every call.
+- htmx → partial template; non-htmx POST → redirect.
+- Alpine.js for client-side UI state only. NEVER `fetch()` from Alpine.
+- One presentation framework. htmx + Alpine is enough — don't add Stimulus or Hotwire on top.
+- Service exceptions propagate to `ServiceExceptionMiddleware`. No try/except in views.
+
 ## 8. Reliable Signals
 
 ### Define (`src/apps/<app>/signals.py`)

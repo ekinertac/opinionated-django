@@ -363,6 +363,53 @@ def test_receiver_is_idempotent(mocker):
 
 Every receiver needs an explicit "called twice, ran once" test. The `send_email` mock here is correct — `send_order_confirmation` wraps an external mail provider, the canonical place mocks belong.
 
+### HTML view tests (django-templates)
+
+For projects using **django-templates** alongside (or instead of) DRF, the view-layer tests use Django's `Client` instead of `APIClient`. Same real-DB rule; just different request/response shape.
+
+```python
+import pytest
+from django.test import Client
+
+
+@pytest.fixture
+def html_client(django_user_model):
+    user = django_user_model.objects.create_user(username="test", password="pw")
+    c = Client()
+    c.login(username="test", password="pw")
+    return c
+
+
+@pytest.mark.django_db
+def test_product_list_renders(html_client, make_product):
+    make_product(name="Widget")
+    response = html_client.get("/products/")
+
+    assert response.status_code == 200
+    assert b"Widget" in response.content
+    assert "products/list.html" in [t.name for t in response.templates]
+
+
+@pytest.mark.django_db
+def test_product_create_via_htmx(html_client):
+    response = html_client.post(
+        "/products/create/",
+        data={"name": "Gadget", "price": "12.50", "stock": "3"},
+        HTTP_HX_REQUEST="true",       # marks it as an htmx request
+    )
+
+    assert response.status_code == 200
+    assert "products/_card.html" in [t.name for t in response.templates]
+    assert b"Gadget" in response.content
+```
+
+Patterns:
+- **`HTTP_HX_REQUEST="true"`** sets the header that `django-htmx` reads — `request.htmx` is True in the view, partial template gets returned.
+- **`response.templates`** lets you assert which template (or partial) rendered. Use this instead of brittle full-HTML comparison.
+- **Same real-DB convention** as everything else — no mocks of own services. Live DB row + view + service round-trip.
+
+API tests (`test_api.py`) and HTML view tests can coexist in the same app's `tests/` directory — one app may have both presentations. Split files: `test_api.py` for DRF, `test_views.py` for HTML.
+
 ## freezegun
 
 Use `@freeze_time` for any test that asserts on timestamps or time-sensitive logic.

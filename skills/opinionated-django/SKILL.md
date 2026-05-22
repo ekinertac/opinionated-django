@@ -52,7 +52,8 @@ src/
 | Just model | django-models |
 | Just repo | django-repositories |
 | Just service | django-services |
-| API surface | django-api |
+| API surface (JSON, DRF) | django-api |
+| HTML pages (templates + htmx + Alpine) | django-templates |
 | Async side effect | django-signals |
 | Settings edit | django-settings |
 | Tests | django-pytest |
@@ -107,6 +108,23 @@ src/
 - Throttling: `AnonRateThrottle` + `UserRateThrottle` global; `ScopedRateThrottle` on login/signup/password-reset.
 - OpenAPI: `@extend_schema(responses={...: DTO.drf_serializer})`. drf-pydantic bridges DTO → schema.
 - File upload < 10MiB: `MultiPartParser` + serializer validation. Large: S3 signed URLs.
+
+## Rules — Templates (HTML via htmx + Alpine)
+
+Peer to django-api. Both layers can coexist (DRF for `/api/v1/`, templates for `/products/`).
+
+- Views function-based. `@login_required` per view (not via global default).
+- No ORM in views. `get(SomeService)` for every call.
+- Forms: `forms.Form`. Never `ModelForm`. Distinct Create + Update.
+- Templates in `src/templates/<app>/`. Partials prefixed `_`.
+- `base.html` carries `hx-headers='{"X-CSRFToken": "{{ csrf_token }}"}'` for global CSRF on htmx.
+- htmx: detect via `request.htmx` (from `django-htmx` middleware). Partial template for htmx, full page + redirect for non-htmx POST.
+- `HX-Trigger` / `HX-Redirect` response headers for client events / redirects.
+- Alpine.js ONLY for client-side UI state (dropdowns, modals, tabs). NEVER data fetching — that's htmx.
+- `ServiceExceptionMiddleware` (peer to DRF exception handler) maps service exceptions to HTML responses. Lives after auth + Htmx middleware.
+- Two-tier perms: `@login_required` / `@permission_required` (request-level) + service `PermissionError` (data-level).
+- Pagination: server-rendered, htmx "load more" via `hx-trigger="revealed"` + `CursorPage[T].next_cursor`.
+- Tests: `Client` with `HTTP_HX_REQUEST="true"` to exercise htmx path. `assertTemplateUsed` via `response.templates`.
 
 ## Rules — Tests
 
