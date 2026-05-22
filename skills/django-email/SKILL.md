@@ -1,6 +1,6 @@
 ---
 name: django-email
-description: Send transactional email from a Django project — AWS SES via SMTP for the transport, Django's templating for bodies, an EmailService with a stable send API, reliable delivery via Celery (at-least-once with retry), idempotency to handle Celery retries safely, and bounce/complaint handling via SNS. Use when adding email to a feature (welcome, password reset, order confirmation, etc.), debugging delivery issues, or whenever the user mentions transactional email, SES, SMTP, bounces, or deliverability.
+description: Transactional email via AWS SES SMTP. EmailService idempotent via sha256(template,to,context) or explicit idempotency_key. Templates: src/templates/emails/<name>/{subject.txt,body.txt,body.html}. Triggered via reliable signal (commits with transaction). Celery retry on SMTPException with exponential backoff. Suppression list from SNS bounce/complaint webhook (verify signature). AWS-side: DKIM, SPF, DMARC, production access.
 allowed-tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 

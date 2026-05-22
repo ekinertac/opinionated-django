@@ -1,6 +1,6 @@
 ---
 name: django-repositories
-description: Design and write repository classes that own all ORM access in a Django project. Use when adding a new entity (the repo is the data-layer hinge in the feature stack), refactoring a service or view that imports models directly, dealing with prefetching for nested DTOs, choosing where a query lives, or any time the user mentions repositories, queries, or DAO/data-access patterns. Repositories are the boundary where Django ORM objects die and Pydantic DTOs are born.
+description: Repository layer. Only place with `.objects` / model imports. Primitives in, DTOs out (`model_validate`). `select_related`/`prefetch_related` for nested. `coerce_related_manager` validator for reverse FK / M2M. Naming: get_by_* raises, list_* returns list, count_*/exists_*/create/update/delete/bulk_*. `@transaction.atomic` on multi-writes. One repo per aggregate root. Page[T] offset + CursorPage[T] cursor pagination.
 allowed-tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 

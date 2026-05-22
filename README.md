@@ -76,7 +76,7 @@ Skills install with a single command:
 npx skills add ekinertac/opinionated-django
 
 # Or just one
-npx skills add ekinertac/opinionated-django/django-scaffold|django-docker|django-architecture|django-models|django-repositories|django-services|django-api|django-signals|django-settings|django-pytest|django-lint|django-cache|django-email|django-deploy|django-ci|django-migrations-scale
+npx skills add ekinertac/opinionated-django/opinionated-django|django-scaffold|django-docker|django-architecture|django-models|django-repositories|django-services|django-api|django-signals|django-settings|django-pytest|django-lint|django-cache|django-email|django-deploy|django-ci|django-migrations-scale
 ```
 
 Your agent will pick them up automatically on its next run. You can also clone the repo and point your agent at `skills/` directly.
@@ -84,6 +84,9 @@ Your agent will pick them up automatically on its next run. You can also clone t
 ## The Skills
 
 Each skill is a directory under `skills/` with its own `SKILL.md`. They stand alone but compose nicely — `django-scaffold` lays the foundation, `django-architecture` builds features on top, and the rest fill in the details.
+
+### `opinionated-django` — start here
+Index and quick reference for the whole stack. Routes to the 16 deep skills below and answers most "what's the convention?" questions inline so the agent doesn't need to load a deep skill body for every lookup. Always invoked first.
 
 ### `django-scaffold`
 Sets up a new (or existing) Django project into the opinionated layout. Creates the `src/config/` shell — split settings, services registry, exception handler, reliable signals, Celery wiring — installs dependencies with `uv`, and lays down ruff / pyrefly / pytest config. **Run this first.**

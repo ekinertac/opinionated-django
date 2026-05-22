@@ -1,6 +1,6 @@
 ---
 name: django-signals
-description: Add reliable signals (async side-effects via Celery) to a Django feature. Use when a business operation needs to trigger post-commit work like notifications, cache invalidation, analytics, or cross-service coordination — any time the user mentions side-effects, events, or async processing tied to a business action.
+description: Reliable signals via Celery. ReliableSignal from config.signals (never standard Django signals for cross-service). send_reliable(sender=None, foo_id=1) inside transaction.atomic(). Args JSON-serializable (IDs not models). Receivers run as Celery tasks on commit. Receivers MUST be idempotent (at-least-once delivery). Use for notifications, cache invalidation, analytics, async side effects.
 allowed-tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 

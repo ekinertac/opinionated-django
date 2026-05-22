@@ -1,6 +1,6 @@
 ---
 name: django-docker
-description: Set up Docker for local Django development — Dockerfile, docker-compose.yml with web/postgres/redis/celery, .dockerignore, and .env.example. Use when scaffolding a new project, adding Docker to an existing one, or any time the user mentions docker, compose, containers, or local environment setup.
+description: Docker Compose for local Django dev. Multi-stage Dockerfile (dev+prod targets), compose.yml (web/postgres/redis/celery), entrypoint.sh (wait postgres, gated migrate), Makefile wrappers (make up/test/migrate). All dev commands through `docker compose exec`. Run after django-scaffold.
 allowed-tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 

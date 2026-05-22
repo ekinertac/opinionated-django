@@ -1,6 +1,6 @@
 ---
 name: django-ci
-description: Set up GitHub Actions CI for the Django project — lint, format check, type check, and tests against a real Postgres + Redis service container, plus a build-and-push job that publishes the production Docker image to GHCR on main. No auto-deploy (Ansible runs from a developer's machine via `make deploy`). Use when adding CI to a new project, switching CI providers, or whenever the user mentions GitHub Actions, CI, pipeline, or build.
+description: GitHub Actions CI. Two jobs. `check`: lint + format-check + typecheck + test against real Postgres/Redis service containers. Every push/PR. `build`: --target prod, push SHA-tagged to GHCR. Master only, never :latest. No auto-deploy — make deploy IMAGE_TAG=<sha> stays manual.
 allowed-tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 

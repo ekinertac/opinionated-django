@@ -1,6 +1,6 @@
 ---
 name: django-pytest
-description: Set up and write pytest tests for a Django project — pytest-django configuration, Celery eager mode for reliable-signal tests, freezegun for time-sensitive logic, builder fixtures for real database rows, the three-layer test convention (repository, service, API), and the rule that mocks belong at external boundaries only. Use when adding tests to a new project, writing tests for a new feature, setting up test infrastructure, or explaining how tests should be organized.
+description: pytest setup + conventions. ALL layers use real test DB (NO mocks of own repos/services — mocks only at external boundaries). pytest-django + --reuse-db + transactional rollback per test. Three files per app: test_repo.py, test_service.py, test_api.py. Builder fixtures (make_*) create real rows. Celery eager mode for reliable signals. freezegun for time. Reliable receivers need "called twice, ran once" idempotency test.
 allowed-tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 

@@ -1,6 +1,6 @@
 ---
 name: django-scaffold
-description: Set up a Django project into the opinionated layout — config/ for project-level settings, urls, celery, and services registry; apps/ for self-contained Django apps with their own models, serializers, views, and tests. Use when starting a new project from scratch or converting an existing one.
+description: Scaffold opinionated Django project. config/ + apps/ layout. Run django-admin startproject, edit result. Splits settings base/local/prod, drops in services registry, BaseModel, ServiceMixin helpers, ReliableSignal base, exception handler, Celery wiring. Installs uv + ruff + pyrefly + pytest. Run first.
 allowed-tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 

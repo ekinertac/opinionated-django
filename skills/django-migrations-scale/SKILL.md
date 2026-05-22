@@ -1,6 +1,6 @@
 ---
 name: django-migrations-scale
-description: Apply schema changes to a production database under rolling deploys without downtime — the expand-contract pattern for destructive changes (drops, renames, type changes), lock-aware DDL with statement_timeout and CREATE INDEX CONCURRENTLY, deploy ordering for multi-step migrations, and the checklist of which Django migration operations are safe vs unsafe at scale. Use when planning a schema change on a production table, modeling a column rename, dropping a field, changing a column type, or whenever the user mentions migrations under load, zero-downtime DDL, expand-contract, or schema evolution.
+description: Zero-downtime schema changes under rolling deploy. Migration safety table (which ops safe vs which need sequencing). Expand-contract for RemoveField/RenameField/AlterField (type). NOT NULL via CHECK ... NOT VALID → backfill → VALIDATE CONSTRAINT → SET NOT NULL. CREATE INDEX CONCURRENTLY with atomic=False. Backfills = management commands NOT RunPython. statement_timeout for DDL.
 allowed-tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 

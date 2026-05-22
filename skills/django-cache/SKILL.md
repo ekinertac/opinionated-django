@@ -1,6 +1,6 @@
 ---
 name: django-cache
-description: Application-level caching using Redis (the cache instance, not the Celery broker) — cache-aside pattern in repository methods, key naming convention, TTL strategy, explicit invalidation on writes, and what NOT to cache. Use when adding caching to repository read methods, debugging stale data, or whenever the user mentions caching, Redis cache, hot reads, or cache invalidation.
+description: Application cache. Lives in repository layer (not service, not view). Use redis_cache instance (NOT broker). Cache-aside via config/cache.py helpers. Keys: <resource>:<id>, per-user data MUST include user_id. TTL default 5min, jitter for hot keys. Explicit invalidate on writes. NEVER cache: money, auth state, list queries (until profiled).
 allowed-tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 

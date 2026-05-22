@@ -1,6 +1,6 @@
 ---
 name: django-api
-description: Design and write the DRF API layer — Serializers for input validation, bare-bones ViewSets that dispatch to services, URL routing with DRF and drf-nested-routers, two-tier authentication and permissions (DRF classes for request-level, service exceptions for data-level), error mapping through the central exception handler, OpenAPI schemas via drf-spectacular, URL-path API versioning, and file upload patterns including S3 signed URLs. Use when adding new endpoints, designing a new resource's API surface, refactoring views that contain business logic or import models, configuring DRF authentication or permissions, or whenever the user mentions ViewSets, serializers, DRF, REST API, OpenAPI, or endpoints.
+description: DRF API layer. Serializers INPUT only (never ModelSerializer). Resource ViewSets inherit ServiceMixin + viewsets.ViewSet (default CRUD actions, override method to customize). Output = dto.model_dump() via dto_response helper. Two-tier perms (DRF classes + service PermissionError). Throttling (Anon/User global, Scoped on login/signup). drf-spectacular via drf-pydantic. URL-path versioning. File upload + S3 signed URLs.
 allowed-tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 

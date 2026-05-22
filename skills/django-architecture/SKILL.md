@@ -1,6 +1,6 @@
 ---
 name: django-architecture
-description: Implement a Django feature following the opinionated architecture — repository pattern, Pydantic DTOs, svcs service locator, DRF ViewSet API, Celery reliable signals, and layered tests. Use when the user asks to add a new entity, endpoint, app, or business logic in a Django project that follows these conventions.
+description: Add a feature end-to-end. Umbrella skill. Walks model → DTO → repo → service → svcs registration → API → admin → tests. Composes django-models/repositories/services/api/pytest. Use for new entity, new endpoint, new app, or new business operation.
 allowed-tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 

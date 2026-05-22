@@ -1,6 +1,6 @@
 ---
 name: django-settings
-description: Organize Django settings into clearly sectioned blocks with banner-style headers across base/local/production split. Use proactively whenever modifying src/config/settings/ — adding new settings, removing settings, or restructuring sections.
+description: Organize Django settings. Split base/local/production. Banner section headers (77 chars =). python-decouple for env vars. Env-specific values in local/production, never base. INSTALLED_APPS short dotted paths. Use when modifying src/config/settings/.
 allowed-tools: Read, Edit
 ---
 

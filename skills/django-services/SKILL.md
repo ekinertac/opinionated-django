@@ -1,6 +1,6 @@
 ---
 name: django-services
-description: Structure Django business logic as plain services that receive their dependencies via constructor injection, and wire them through an svcs registry so they can be resolved anywhere — views, Celery tasks, management commands, tests. Use when adding a new service, refactoring fat views or model methods into a service, wiring a service into the registry, or explaining where business logic should live in this project.
+description: Plain service classes. Repos via __init__. Zero ORM, zero model imports. Resource services use `_item(s)` suffix on ALL methods (list_items, get_item, create_item, update_item, delete_item, archive_item — strict, no resource-named methods). Non-resource services (notification/payment/search) use action verbs. Take user_id not request.user. Raise plain Python exceptions. svcs registry resolves via get(SomeService).
 allowed-tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 

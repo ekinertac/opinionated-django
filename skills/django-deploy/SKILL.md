@@ -1,6 +1,6 @@
 ---
 name: django-deploy
-description: Deploy a Django project to production at mid-scale with self-hosted infrastructure — multi-stage production Dockerfile, gunicorn, health and readiness endpoints, JSON logging, an Ansible playbook structure with Vault-encrypted secrets, a rolling deploy across multiple gunicorn hosts behind a self-hosted HAProxy load balancer, separate beat-singleton + N celery worker hosts, self-hosted Postgres and Redis (broker and cache as separate instances), self-hosted GlitchTip for errors, plus pragmatic external services (S3 for static and media, AWS SES for email, Let's Encrypt for TLS). Use when setting up production for the first time, adding deployment infrastructure, or whenever the user mentions deploy, production, Ansible, gunicorn, HAProxy, staging, or prod.
+description: Production deploy. Multi-stage Dockerfile (prod target), gunicorn, /healthz + /readyz, JSON logging. Ansible + Vault. Self-hosted: HAProxy (lb) + Postgres (db) + Redis × 2 (broker, cache) + GlitchTip + pgbouncer. External only: S3, AWS SES, Let's Encrypt. Zero-downtime rolling (HAProxy drain → swap → readyz → resume). worker_beat singleton + N worker hosts. make provision / make deploy IMAGE_TAG=<sha> / make rollback. pg_dump backups + rclone off-host.
 allowed-tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 

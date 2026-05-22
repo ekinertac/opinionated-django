@@ -1,6 +1,6 @@
 ---
 name: django-models
-description: Structure Django models with proper Meta classes, verbose names, and optimized indexes. Use when creating or reviewing Django models to ensure consistent ordering, correct verbose_name/verbose_name_plural, and database indexes aligned to actual query patterns. Also registers every model in the admin with a clean, fast-loading configuration.
+description: Django model conventions. Inherit BaseModel (timestamps). Member order: choices → fields → manager → Meta → methods. Field order: identifiers → time → status → domain → relations. BigAutoField PK. No business logic (custom managers, save overrides, signals, computed props are banned — table maps each to where it lives instead). Uniqueness/indexes in Meta. Admin registration conventions.
 allowed-tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 
