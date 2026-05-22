@@ -72,7 +72,10 @@ src/
 Skills install with a single command:
 
 ```bash
-# The whole collection
+# All-in-one — single self-contained skill with everything compressed
+npx skills add ekinertac/opinionated-django/django-stack
+
+# OR the full layered set (17 skills, progressive disclosure)
 npx skills add ekinertac/opinionated-django
 
 # Or just one
@@ -85,8 +88,11 @@ Your agent will pick them up automatically on its next run. You can also clone t
 
 Each skill is a directory under `skills/` with its own `SKILL.md`. They stand alone but compose nicely — `django-scaffold` lays the foundation, `django-architecture` builds features on top, and the rest fill in the details.
 
-### `opinionated-django` — start here
-Index and quick reference for the whole stack. Routes to the 16 deep skills below and answers most "what's the convention?" questions inline so the agent doesn't need to load a deep skill body for every lookup. Always invoked first.
+### `django-stack` — all-in-one alternative
+Single self-contained skill that compresses all 16 layered skills into one file with canonical code samples. Install this instead of the full layered set if you want everything in one place. Trade-off: heavier to load when invoked, but no per-task routing needed.
+
+### `opinionated-django` — index for the full layered set
+Quick reference + routing table for the 16 deep skills below. Answers most "what's the convention?" questions inline so the agent doesn't load a deep skill body for every lookup. Use this when you've installed the full layered set.
 
 ### `django-scaffold`
 Sets up a new (or existing) Django project into the opinionated layout. Creates the `src/config/` shell — split settings, services registry, exception handler, reliable signals, Celery wiring — installs dependencies with `uv`, and lays down ruff / pyrefly / pytest config. **Run this first.**
